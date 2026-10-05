@@ -1,0 +1,37 @@
+# bale: default exclusion set (BALE.md §6.4)
+# Created by the git-init walkthrough. Edit freely; bale won't rewrite this.
+
+# Bale and git internals
+.bale/
+.git/
+
+# Common big-build dirs
+node_modules/
+__pycache__/
+.venv/
+target/
+dist/
+build/
+.next/
+.nuxt/
+out/
+.cache/
+
+# Common secret patterns.
+# Pack's filter only excludes .npmrc when its content matches `_authToken`
+# (see npmrc_has_authtoken). .gitignore can't express a content-conditional,
+# so this list ignores .npmrc unconditionally — un-ignore with `!.npmrc`
+# if your project's .npmrc is genuinely public (registry config only).
+.env
+.env.*
+*.pem
+*.key
+*_rsa
+*_dsa
+*.p12
+*.pfx
+id_rsa
+id_dsa
+.aws/credentials
+.npmrc
+.pypirc
