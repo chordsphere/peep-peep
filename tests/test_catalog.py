@@ -160,5 +160,61 @@ class RenameTest(TempDirMixin, unittest.TestCase):
             cat.rename(self.tmp, "last", "???")
 
 
+
+class DiscardTest(TempDirMixin, unittest.TestCase):
+    """Session B: the discard hotkey / dialog Delete."""
+
+    def test_discard_removes_files_and_the_fold_forgets_it(self):
+        keep = record(self.tmp, "inbox", "2026-10-05-keep")
+        uid = record(self.tmp, "inbox", "2026-10-05-take")
+        (self.tmp / "inbox" / "2026-10-05-take.recording.mkv").write_bytes(b"leftover")
+        e = cat.discard(self.tmp, uid, reason="hotkey")
+        self.assertEqual(e.file, "inbox/2026-10-05-take.mp4")
+        self.assertEqual(sorted(p.name for p in (self.tmp / "inbox").iterdir()),
+                         ["2026-10-05-keep.json", "2026-10-05-keep.mp4"])
+        self.assertEqual([x.uid for x in cat.Catalog(self.tmp).entries()], [keep])
+        ev = cat.Catalog(self.tmp).events()[-1]
+        self.assertEqual((ev["event"], ev["uid"], ev["reason"]), ("discarded", uid, "hotkey"))
+        self.assertEqual(sorted(ev["removed"]), ["2026-10-05-take.json", "2026-10-05-take.mp4",
+                                                  "2026-10-05-take.recording.mkv"])
+        with self.assertRaises(LookupError):
+            cat.discard(self.tmp, uid)                       # gone from the fold
+
+    def test_discard_by_last_and_failed_takes(self):
+        record(self.tmp, "inbox", "2026-10-05-ok")
+        failed = record(self.tmp, "inbox", "2026-10-05-broken", ext=".mkv", event="failed")
+        cat.discard(self.tmp, failed)
+        self.assertFalse((self.tmp / "inbox" / "2026-10-05-broken.mkv").exists())
+        cat.discard(self.tmp, "last")
+        self.assertEqual(cat.Catalog(self.tmp).entries(), [])
+
+    def test_already_missing_files_are_logged_not_fatal(self):
+        uid = record(self.tmp, "inbox", "2026-10-05-gone")
+        for p in (self.tmp / "inbox").iterdir():
+            p.unlink()
+        with self.assertLogs("peep.catalog", "WARNING") as logs:
+            cat.discard(self.tmp, uid)
+        self.assertIn("discard.nothing_on_disk", logs.output[0])
+        self.assertEqual(cat.Catalog(self.tmp).entries(), [])
+
+    def test_undeletable_file_raises_before_the_event(self):
+        uid = record(self.tmp, "inbox", "2026-10-05-locked")
+        from unittest import mock
+        with mock.patch("os.remove", side_effect=PermissionError("[WinError 32] in use")):
+            with self.assertRaises(PermissionError):
+                cat.discard(self.tmp, uid)
+        self.assertEqual(len(cat.Catalog(self.tmp).entries()), 1)        # the catalog never lies
+
+    def test_recent_collections(self):
+        record(self.tmp, "inbox", "2026-10-05-a")
+        b = record(self.tmp, "test", "2026-10-05-b")
+        record(self.tmp, "bale", "2026-10-05-c")
+        self.assertEqual(cat.Catalog(self.tmp).recent_collections(), ["bale", "test", "inbox"])
+        cat.rename(self.tmp, b, "b moved", "demos")
+        self.assertEqual(cat.Catalog(self.tmp).recent_collections(), ["demos", "bale", "inbox"])
+        cat.discard(self.tmp, b)
+        self.assertEqual(cat.Catalog(self.tmp).recent_collections(), ["bale", "inbox"])
+        self.assertEqual(cat.Catalog(self.tmp).recent_collections(limit=1), ["bale"])
+
 if __name__ == "__main__":
     unittest.main()

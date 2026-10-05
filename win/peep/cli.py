@@ -5,6 +5,8 @@ run directly from any Windows console.
   rec [slug] [--collection C] [--no-flash] [--no-mic] [--scale WxH|native]
              [--encoder qsv|qsv-download|x264] [--fps N] [--stdin-stop line|off]
   stop [--no-wait] [--timeout S]
+  mark [--label TEXT]              drop a mark in the running recording (session B)
+  agent VERB                       the resident hotkey agent; see agentcli.py (session B)
   ls [--collection C] [--limit N] [--all] [--json]
   open [REF] [--folder]            REF: last (default), a stem, or a uid prefix
   rename REF NAME [--collection C]
@@ -15,9 +17,9 @@ run directly from any Windows console.
 Exit codes: 0 success, 1 failure (message on stderr), 2 usage error.
 
 Sections:
-  1. Parser                     (~line 40)
-  2. Commands                   (~line 91)
-  3. Entry point                (~line 282)
+  1. Parser                     (~line 42)
+  2. Commands                   (~line 100)
+  3. Entry point                (~line 305)
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ import sys
 import threading
 from pathlib import Path
 
-from . import __version__, catalog, config as config_mod, naming, paths
+from . import __version__, agentcli, catalog, config as config_mod, naming, paths
 from .control import AlreadyRecording, Control
 from .logsetup import configured_log_path, event, setup_logging
 
@@ -62,6 +64,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-wait", action="store_true", help="return as soon as the request is written")
     s.add_argument("--timeout", type=float, default=60.0, help="seconds to wait for the file to finalize")
 
+    m = sub.add_parser("mark", help="drop a mark (cyan flash + sidecar entry) in the running recording")
+    m.add_argument("--label", "-l", default="", help="optional text stored with the mark")
+
     ls = sub.add_parser("ls", help="list recordings from the catalog")
     ls.add_argument("--collection", "-c")
     ls.add_argument("--limit", "-n", type=int, default=20)
@@ -84,6 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--init", action="store_true", help="write a commented template if none exists")
 
     sub.add_parser("paths", help="show where peep keeps things")
+    agentcli.add_parser(sub)
     return p
 
 
@@ -185,6 +191,16 @@ def cmd_stop(args, cfg) -> int:
     return 1
 
 
+def cmd_mark(args, cfg) -> int:
+    try:
+        _control().request_mark("cli", args.label)
+    except LookupError as exc:
+        _err(str(exc))
+        return 1
+    _out("◆ mark requested" + (f" ({args.label})" if args.label else ""))
+    return 0
+
+
 def format_duration(seconds) -> str:
     if not isinstance(seconds, (int, float)):
         return "?"
@@ -268,6 +284,7 @@ def cmd_config(args, cfg) -> int:
 def cmd_paths(args, cfg) -> int:
     rows = [("data dir", paths.data_dir()), ("config", paths.config_path()),
             ("log", configured_log_path() or paths.logs_dir() / "peep.log"),
+            ("agent log", paths.logs_dir() / "agent.log"),
             ("state", paths.state_dir()), ("app (installed code)", paths.data_dir() / "app"),
             ("recordings root", cfg.root_path()), ("catalog", cfg.root_path() / catalog.CATALOG_NAME)]
     for k, v in rows:
@@ -275,8 +292,9 @@ def cmd_paths(args, cfg) -> int:
     return 0
 
 
-COMMANDS = {"rec": cmd_rec, "stop": cmd_stop, "ls": cmd_ls, "open": cmd_open, "rename": cmd_rename,
-            "doctor": cmd_doctor, "config": cmd_config, "paths": cmd_paths}
+COMMANDS = {"rec": cmd_rec, "stop": cmd_stop, "mark": cmd_mark, "ls": cmd_ls, "open": cmd_open,
+            "rename": cmd_rename, "doctor": cmd_doctor, "config": cmd_config, "paths": cmd_paths,
+            "agent": agentcli.cmd_agent}
 
 # ---------------------------------------------------------------------------
 # 3. Entry point
@@ -291,11 +309,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cfg = config_mod.load()
     except config_mod.ConfigError as exc:
-        setup_logging(paths.logs_dir())
+        setup_logging(paths.logs_dir(), file_name=agentcli.log_file_for(args))
         event(log, logging.ERROR, "config.invalid", error=str(exc))
         _err(f"config: {exc}")
         return 1
-    setup_logging(paths.logs_dir(), cfg.log_level)
+    setup_logging(paths.logs_dir(), cfg.log_level, file_name=agentcli.log_file_for(args))
     event(log, logging.INFO, "cli.start", command=args.command, argv=sys.argv[1:] if argv is None else argv,
           version=__version__, config=cfg.source)
     try:

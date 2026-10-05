@@ -21,7 +21,7 @@ Windows side. What the shim does itself:
   * doctor    shim-side checks (python.exe, installed copy, PATH) before
               the Windows-side doctor
 
-Commands: rec, stop, ls, open, rename, doctor, config, paths, install, help.
+Commands: rec, stop, mark, ls, open, rename, doctor, config, paths, agent, install, help.
 Environment: PEEP_PYTHON (default python.exe), PEEP_NO_AUTOSYNC=1,
 PEEP_REC_NO_SETSID=1 (keep `rec`'s child in this terminal's session).
 
@@ -53,13 +53,14 @@ from pathlib import Path
 REPO = Path(os.path.realpath(__file__)).parent.parent
 WIN_SRC = REPO / "win"
 APP_MARKER = "INSTALLED.json"
-WIN_COMMANDS = ("rec", "stop", "ls", "open", "rename", "doctor", "config", "paths")
+WIN_COMMANDS = ("rec", "stop", "mark", "ls", "open", "rename", "doctor", "config", "paths", "agent")
 USAGE = """\
 usage: peep <command> [args]
 
   rec [slug] [--collection NAME] [--no-flash] [--no-mic] [--scale 1920x1200] [--encoder qsv|qsv-download|x264]
                           record until q / Enter / Ctrl-C here, or `peep stop` from another shell
   stop                    stop the running recording and wait for the file
+  mark [--label TEXT]     drop a mark (cyan flash + sidecar entry) in the running recording
   ls [--collection NAME] [--all] [--json]
   open [last|STEM] [--folder]
   rename last NAME [--collection NAME]
@@ -67,6 +68,11 @@ usage: peep <command> [args]
   config [--init]         show the effective config / write a template
   paths                   where config, logs and recordings live
   install                 copy the Windows package to %LOCALAPPDATA%\\peep\\app, link ~/.local/bin/peep
+
+  agent install           start the hotkey agent at every login (and now); agent uninstall undoes it
+  agent start|stop|restart|status|reload
+                          Ctrl+Alt+R record/stop (then name it), Ctrl+Alt+M mark, Ctrl+Alt+X discard
+                          (every peep command syncs the Windows copy first; `agent restart` loads it)
 """
 
 
@@ -196,7 +202,10 @@ def sync(app: Path, src: Path = WIN_SRC) -> list[str]:
             if rel not in want:
                 p.unlink()
                 copied.append(f"(removed) {rel}")
-    marker = {"files": want, "source": str(src), "commit": git_commit(src)}
+    # wsl_distro lets the Windows-side agent find this repo over \\wsl.localhost for its
+    # staleness check (session B); it never syncs, the shim stays the only writer.
+    marker = {"files": want, "source": str(src), "commit": git_commit(src),
+              "wsl_distro": os.environ.get("WSL_DISTRO_NAME") or None}
     (app / APP_MARKER).write_text(json.dumps(marker, indent=2) + "\n", encoding="utf-8")
     return copied
 

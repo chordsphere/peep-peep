@@ -14,8 +14,10 @@ and stderr tail on failure.
   start   ffmpeg launched into <stem>.recording.mkv; if the pipeline dies
           during start-up, the next one in video.fallback is tried, loudly
   flash   start flash once ffmpeg reports its output open (+ lead_ms)
-  wait    until stop_event (q/Enter in the terminal), a stop-request file
-          (`peep stop`), or ffmpeg exiting on its own (a failure)
+  wait    until stop_event (q/Enter in the terminal, or the agent's hotkey), a
+          stop-request file (`peep stop`), or ffmpeg exiting on its own (a
+          failure); meanwhile mark requests (`peep mark`, the agent's mark
+          hotkey) flash the mark colour and land in the sidecar's `marks`
   stop    stop flash, settle_ms, then `q`; escalate to terminate on timeout
   final   remux to <stem>.mp4 (streams copied) and drop the capture, or
           keep the Matroska; sidecar completed; catalog event appended
@@ -49,6 +51,7 @@ from . import catalog, ffmpeg_cmd, naming
 from .config import Config
 from .flash import FlashRecord, NullFlasher
 from .logsetup import event
+from .winapi import ForegroundInfo
 
 log = logging.getLogger("peep.recorder")
 
@@ -203,6 +206,10 @@ class RecordRequest:
     pipeline: str | None = None
     scale: str | None = None
     fps: int | None = None
+    # Session B: the agent reads the foreground window when the hotkey arrives
+    # (A's Proposal 2) and says who started the recording ("terminal" | "agent").
+    foreground: ForegroundInfo | None = None
+    origin: str = "terminal"
 
 
 @dataclass
@@ -214,6 +221,7 @@ class RecordResult:
     sidecar_path: Path | None = None
     exit_code: int | None = None
     stderr_tail: list[str] = field(default_factory=list)
+    duration_s: float | None = None
 
 
 class RecordError(RuntimeError):
@@ -223,6 +231,14 @@ class RecordError(RuntimeError):
 # ---------------------------------------------------------------------------
 # 3. Recorder
 # ---------------------------------------------------------------------------
+
+
+def _seconds_between(start_iso: str | None, end_iso: str | None) -> float | None:
+    """end - start in seconds, both ISO strings with offsets; None if either is unusable."""
+    try:
+        return round((_dt.datetime.fromisoformat(end_iso) - _dt.datetime.fromisoformat(start_iso)).total_seconds(), 3)
+    except (TypeError, ValueError):
+        return None
 
 
 def resolve_ffmpeg(path: str, which: Callable[[str], str | None]) -> str | None:
@@ -266,7 +282,7 @@ class Recorder:
             raise RecordError(f"ffmpeg not found ({cfg.ffmpeg.path!r}); run `peep doctor` "
                               f"(fix: winget install Gyan.FFmpeg)")
         collection = naming.validate_collection(req.collection or cfg.default_collection)
-        fg = self.foreground()
+        fg = req.foreground if req.foreground is not None else self.foreground()
         slug = naming.slug_from_user(req.slug) if req.slug else naming.suggest_slug(fg.image, fg.title)
         coll_dir = cfg.root_path() / collection
         coll_dir.mkdir(parents=True, exist_ok=True)
@@ -284,9 +300,11 @@ class Recorder:
         sc["audio"] = ({"device": cfg.audio.device, "codec": "aac", "bitrate": cfg.audio.bitrate,
                         "offset_ms": cfg.audio.offset_ms} if use_audio else None)
         sc["flash"]["enabled"] = use_flash
+        sc["timeline"]["origin"] = req.origin
 
         # Claim before writing anything: a refused claim (already recording) must leave no trace.
-        self.control.claim({"uid": uid, "capture": str(capture), "final": str(final), "sidecar": str(side)})
+        self.control.claim({"uid": uid, "capture": str(capture), "final": str(final), "sidecar": str(side),
+                            "origin": req.origin, "status": "starting"})
         proc: FfmpegProcess | None = None
         flasher = NullFlasher()
         try:
@@ -306,9 +324,17 @@ class Recorder:
             if use_flash:
                 rec = flasher.flash(cfg.flash.start_color, cfg.flash.duration_ms)
                 sc["flash"]["start"] = rec.to_sidecar(t0)
+            self.control.update_active(status="recording", recording_since=catalog.now_iso(),
+                                       ffmpeg_started_at=proc.started_at)
             self.status(f"● recording → {final}\n  press q or Enter to stop (or run `peep stop` elsewhere)")
 
-            reason = self._wait_for_stop(proc, stop_event)
+            def take_marks():
+                self._take_marks(flasher if use_flash else None, sc, side, t0, proc.started_at)
+
+            reason = self._wait_for_stop(proc, stop_event, on_tick=take_marks)
+            if reason != "ffmpeg-exited":
+                take_marks()              # a mark pressed just before the stop still counts
+            self.control.update_active(status="stopping")
             timeline["stop_requested_at"] = catalog.now_iso()
             timeline["stop_requested_s"] = round(time.monotonic() - t0, 3)
             timeline["stop_reason"] = reason
@@ -402,15 +428,51 @@ class Recorder:
         sc["ffmpeg"]["attempts"] = attempts
         return None, None, spec
 
-    def _wait_for_stop(self, proc: FfmpegProcess, stop_event: threading.Event, poll_s: float = 0.1) -> str:
+    def _wait_for_stop(self, proc: FfmpegProcess, stop_event: threading.Event, poll_s: float = 0.1,
+                       on_tick: Callable[[], None] | None = None) -> str:
         while True:
             if stop_event.is_set():
-                return "terminal"
+                return getattr(stop_event, "reason", None) or "terminal"
             if self.control.stop_requested():
                 return "peep-stop"
             if proc.poll() is not None:
                 return "ffmpeg-exited"
+            if on_tick is not None:
+                on_tick()
             stop_event.wait(poll_s)
+
+    def _take_marks(self, flasher, sc: dict, side: Path, t0: float, ffmpeg_started_at: str) -> None:
+        """Turn pending mark requests into sidecar `marks` entries.
+
+        `t` (A's reserved key) is the press, in seconds since the ffmpeg launch:
+        the requester's wall-clock `requested_at` minus `ffmpeg_started_at`, so the
+        <=100 ms poll delay does not shift it. When flashes are on, the mark-colour
+        flash's own stamp (same clock as flash.start/stop) is kept beside it, and
+        that flash is what session C finds in the video. The sidecar is rewritten
+        straight away, so a crash later in the recording keeps its marks."""
+        requests = self.control.take_marks()
+        if not requests:
+            return
+        cfg = self.cfg
+        for req in requests:
+            consumed = time.monotonic()
+            t = _seconds_between(ffmpeg_started_at, req.get("requested_at"))
+            if t is None:
+                t = round(consumed - t0, 3)
+            mark = {"t": t, "label": str(req.get("label") or ""), "since_ffmpeg_start_s": t,
+                    "at": req.get("requested_at"), "source": req.get("source"),
+                    "consumed_s": round(consumed - t0, 3), "flash": None}
+            if flasher is not None:
+                mark["flash"] = flasher.flash(cfg.flash.mark_color, cfg.flash.duration_ms).to_sidecar(t0)
+            sc["marks"].append(mark)
+            n = len(sc["marks"])
+            event(log, logging.INFO, "record.mark", n=n, t=t, source=mark["source"], label=mark["label"],
+                  flashed=mark["flash"] is not None)
+            self.status(f"◆ mark {n} at {t:.1f}s" + (f" ({mark['label']})" if mark["label"] else ""))
+        try:
+            catalog.write_sidecar(side, sc)
+        except OSError as exc:      # the marks are still in memory and land with the final sidecar
+            event(log, logging.WARNING, "sidecar.mark_write_failed", path=str(side), error=repr(exc))
 
     def _discard_empty(self, path: Path) -> None:
         try:
@@ -463,7 +525,7 @@ class Recorder:
             why = "ffmpeg stopped on its own" if reason == "ffmpeg-exited" else f"ffmpeg exited {rc}"
             kept = f"; partial capture kept at {media}" if media else ""
             return RecordResult(False, f"recording failed: {why}{kept}", uid=uid, media_path=media,
-                                sidecar_path=side, exit_code=rc, stderr_tail=tail)
+                                sidecar_path=side, exit_code=rc, stderr_tail=tail, duration_s=sc["duration_s"])
 
         media = capture
         if cfg.output.container == "mp4":
@@ -480,7 +542,7 @@ class Recorder:
                                       "created": sc["created"], "duration_s": sc["duration_s"]})
         dur = f"{sc['duration_s']:.1f}s" if isinstance(sc["duration_s"], (int, float)) else "?s"
         return RecordResult(True, f"saved {media} ({dur})", uid=uid, media_path=media, sidecar_path=side,
-                            exit_code=rc)
+                            exit_code=rc, duration_s=sc["duration_s"])
 
     def _remux(self, ffmpeg: str, capture: Path, final: Path, sc: dict) -> Path:
         """Capture -> MP4. On failure the Matroska is kept (renamed to <stem>.mkv)

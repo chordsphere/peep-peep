@@ -46,7 +46,9 @@ class DispatchTest(TempDirMixin, unittest.TestCase):
     def test_passthrough_commands_reach_windows_verbatim(self):
         cfg = dict(CFG, app_wsl=str(self.tmp))
         for argv in (["ls", "--collection", "bale"], ["stop"], ["open", "last", "--folder"],
-                     ["rename", "last", "Bale: pack demo"], ["paths"], ["config", "--init"]):
+                     ["rename", "last", "Bale: pack demo"], ["paths"], ["config", "--init"],
+                     ["mark", "--label", "step 2"], ["agent", "status"], ["agent", "install"],
+                     ["agent", "restart"]):
             with self.subTest(argv=argv), \
                     mock.patch.object(shim, "load_shim_config", return_value=cfg), \
                     mock.patch.object(shim, "autosync"), \
@@ -140,6 +142,16 @@ class SyncTest(TempDirMixin, unittest.TestCase):
         self.assertTrue((app / "config-notes.txt").exists())
         marker = json.loads((app / shim.APP_MARKER).read_text())
         self.assertEqual(marker["files"], shim.source_files(WIN))
+
+    def test_marker_names_the_wsl_distro_for_the_agents_staleness_check(self):
+        app = self.tmp / "app"
+        with mock.patch.dict(os.environ, {"WSL_DISTRO_NAME": "Ubuntu"}):
+            shim.sync(app, WIN)
+        marker = json.loads((app / shim.APP_MARKER).read_text())
+        self.assertEqual(marker["wsl_distro"], "Ubuntu")
+        self.assertEqual(marker["source"], str(WIN))
+        for mod in ("agent", "agentcli", "hotkeys", "pill", "dialog", "ui", "lifecycle"):
+            self.assertIn(f"peep/{mod}.py", marker["files"])          # B's modules travel with the sync
 
     def test_modified_or_deleted_installed_file_triggers_resync(self):
         app = self.tmp / "app"

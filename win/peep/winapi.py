@@ -11,11 +11,23 @@ so the rest of the package stays testable on Linux.
   pid_alive(pid)        liveness for the control file's recorder pid
   open_with_default()   os.startfile, the Windows default handler
 
+Session B (the resident agent) adds section 5:
+  SingleInstance        a named mutex, so a second agent refuses to start
+  toplevel_hwnd()       the real top-level HWND behind a Tk window id
+  exclude_from_capture  SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE): the
+                        REC pill is seen by the user, absent from the file
+                        (probe 2026-10-05: ddagrab honours it on this laptop,
+                        including for the pill's layered click-through recipe)
+  make_click_through    WS_EX_LAYERED|TRANSPARENT|TOOLWINDOW|NOACTIVATE
+  force_foreground      bring the stop dialog to the front and give it focus
+  startup_folder()      FOLDERID_Startup, for `peep agent install`
+
 Sections:
-  1. Platform + foreground      (~line 33)
-  2. DPI                        (~line 91)
-  3. Job object                 (~line 114)
-  4. Processes + shell          (~line 187)
+  1. Platform + foreground      (~line 45)
+  2. DPI                        (~line 103)
+  3. Job object                 (~line 126)
+  4. Processes + shell          (~line 199)
+  5. Agent windows + lifecycle  (~line 238)
 """
 
 from __future__ import annotations
@@ -221,3 +233,171 @@ def open_with_default(path: str) -> None:
     if not is_windows():
         raise OSError("opening with the default handler needs Windows (run through the peep shim)")
     os.startfile(path)  # noqa: S606 — the whole point
+
+
+# ---------------------------------------------------------------------------
+# 5. Agent windows + lifecycle (session B)
+# ---------------------------------------------------------------------------
+
+WDA_NONE, WDA_EXCLUDEFROMCAPTURE = 0x0, 0x11
+GWL_EXSTYLE = -20
+WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE = 0x80000, 0x20, 0x80, 0x08000000
+ERROR_ALREADY_EXISTS = 183
+
+
+def _user32():
+    import ctypes
+    from ctypes import wintypes
+    u = ctypes.WinDLL("user32", use_last_error=True)
+    u.GetAncestor.restype = wintypes.HWND
+    u.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+    u.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+    u.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.LONG]
+    u.SetWindowDisplayAffinity.argtypes = [wintypes.HWND, wintypes.DWORD]
+    u.GetWindowDisplayAffinity.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    u.SetForegroundWindow.argtypes = [wintypes.HWND]
+    u.BringWindowToTop.argtypes = [wintypes.HWND]
+    u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.c_void_p]
+    u.GetForegroundWindow.restype = wintypes.HWND
+    return u
+
+
+class SingleInstance:
+    """A named mutex held for the life of the process. `acquired` is False when
+    another process already holds it. Off Windows it always acquires (the
+    pidfile in control.AgentControl still guards, less strictly)."""
+
+    def __init__(self, name: str = "Local\\peep-agent"):
+        self.name, self.handle, self.acquired = name, None, True
+        if not is_windows():
+            return
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateMutexW.restype = wintypes.HANDLE
+        self.handle = k32.CreateMutexW(None, False, name)
+        err = ctypes.get_last_error()
+        if not self.handle:
+            event(log, logging.WARNING, "mutex.create_failed", mutex=name, winerror=err)
+            return
+        self.acquired = err != ERROR_ALREADY_EXISTS
+        event(log, logging.INFO, "mutex.created", mutex=name, acquired=self.acquired)
+
+
+def toplevel_hwnd(tk_window_id: int) -> int | None:
+    """Tk's winfo_id() is a child window; capture affinity and extended styles
+    belong on the top-level wrapper (GetAncestor GA_ROOT)."""
+    if not is_windows():
+        return None
+    try:
+        return _user32().GetAncestor(tk_window_id, 2) or None
+    except Exception as exc:
+        event(log, logging.WARNING, "hwnd.ancestor_failed", error=repr(exc))
+        return None
+
+
+def exclude_from_capture(hwnd: int | None) -> bool:
+    """True only if the affinity reads back as WDA_EXCLUDEFROMCAPTURE. Callers
+    must not show a window over a recording when this returns False."""
+    if not hwnd:
+        event(log, logging.WARNING, "capture_exclusion.no_hwnd")
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        u = _user32()
+        ok = u.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
+        err = ctypes.get_last_error()
+        got = wintypes.DWORD()
+        u.GetWindowDisplayAffinity(hwnd, ctypes.byref(got))
+        result = bool(ok) and got.value == WDA_EXCLUDEFROMCAPTURE
+        event(log, logging.INFO if result else logging.WARNING, "capture_exclusion.set", hwnd=hwnd,
+              ok=bool(ok), winerror=err, readback=got.value)
+        return result
+    except Exception as exc:
+        event(log, logging.WARNING, "capture_exclusion.failed", error=repr(exc))
+        return False
+
+
+def make_click_through(hwnd: int | None) -> bool:
+    if not hwnd:
+        return False
+    try:
+        u = _user32()
+        ex = u.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        u.SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)
+        return True
+    except Exception as exc:
+        event(log, logging.WARNING, "click_through.failed", error=repr(exc))
+        return False
+
+
+def force_foreground(hwnd: int | None) -> str:
+    """Put `hwnd` in front with keyboard focus. Returns which step worked
+    ('direct', 'attach', 'alt-tap') or 'failed'; every attempt is logged.
+
+    The laptop's ForegroundLockTimeout is at its maximum (probe), so Windows
+    only lets a process take the foreground when it received the last input.
+    The stop hotkey normally qualifies us; if the user typed elsewhere while
+    the file was finalizing, the AttachThreadInput and Alt-tap fallbacks are
+    the documented-in-practice ways back in."""
+    if not hwnd or not is_windows():
+        return "failed"
+    try:
+        import ctypes
+        u = _user32()
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        if u.SetForegroundWindow(hwnd) and u.GetForegroundWindow() == hwnd:
+            step = "direct"
+        else:
+            fg = u.GetForegroundWindow()
+            fg_tid = u.GetWindowThreadProcessId(fg, None) if fg else 0
+            me = k32.GetCurrentThreadId()
+            attached = bool(fg_tid and fg_tid != me and u.AttachThreadInput(me, fg_tid, True))
+            try:
+                u.BringWindowToTop(hwnd)
+                u.SetForegroundWindow(hwnd)
+            finally:
+                if attached:
+                    u.AttachThreadInput(me, fg_tid, False)
+            if u.GetForegroundWindow() == hwnd:
+                step = "attach"
+            else:
+                VK_MENU, KEYEVENTF_KEYUP = 0x12, 0x2
+                u.keybd_event(VK_MENU, 0, 0, 0)
+                u.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+                u.SetForegroundWindow(hwnd)
+                step = "alt-tap" if u.GetForegroundWindow() == hwnd else "failed"
+        event(log, logging.INFO if step != "failed" else logging.WARNING, "foreground.force", hwnd=hwnd, step=step)
+        return step
+    except Exception as exc:
+        event(log, logging.WARNING, "foreground.force_failed", error=repr(exc))
+        return "failed"
+
+
+def startup_folder() -> str | None:
+    """FOLDERID_Startup via SHGetKnownFolderPath (honours folder redirection);
+    None off Windows or on failure (callers fall back to %APPDATA%)."""
+    if not is_windows():
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class GUID(ctypes.Structure):
+            _fields_ = [("a", wintypes.DWORD), ("b", wintypes.WORD), ("c", wintypes.WORD),
+                        ("d", ctypes.c_ubyte * 8)]
+
+        g = GUID(0xB97D20BB, 0xF46A, 0x4C97,
+                 (ctypes.c_ubyte * 8)(0xBA, 0x10, 0x5E, 0x36, 0x08, 0x43, 0x08, 0x54))
+        out = ctypes.c_wchar_p()
+        hr = ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(g), 0, None, ctypes.byref(out))
+        path = out.value
+        ctypes.windll.ole32.CoTaskMemFree(out)
+        if hr != 0 or not path:
+            event(log, logging.WARNING, "startup_folder.failed", hresult=hr)
+            return None
+        return path
+    except Exception as exc:
+        event(log, logging.WARNING, "startup_folder.failed", error=repr(exc))
+        return None
