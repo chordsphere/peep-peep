@@ -11,9 +11,21 @@ In `paths.state_dir()`:
                    is detected (pid not alive) rather than trusted.
   stop-request     written by `stop`; the recorder polls for it every
                    100 ms, consumes it, and stops cleanly.
+  mark-<ns>-<pid>.json
+                   one file per mark request (`peep mark`, the agent's mark
+                   hotkey); the recorder polls them with the stop request,
+                   flashes, and appends each to the sidecar's `marks`. One
+                   file per request, so two presses inside one poll interval
+                   are two marks, not one.
+  agent.json       the resident agent's pid and status (AgentControl)
+  agent-command    `stop` or `reload`, written by `peep agent stop|reload`
 
-The recorder clears any stop-request left over from before it started,
-so a stray `peep stop` cannot end the next recording at birth.
+The recorder clears any stop-request and mark files left over from before
+it started, so a stray `peep stop` cannot end the next recording at birth.
+
+Sections:
+  1. Recording control (Control)      (~line 45)
+  2. Agent control (AgentControl)     (~line 195)
 """
 
 from __future__ import annotations
@@ -32,10 +44,23 @@ log = logging.getLogger("peep.control")
 
 ACTIVE = "active.json"
 STOP = "stop-request"
+MARK_GLOB = "mark-*.json"
+AGENT = "agent.json"
+AGENT_COMMAND = "agent-command"
+AGENT_COMMANDS = ("stop", "reload")
 
 
 class AlreadyRecording(RuntimeError):
     pass
+
+
+class AgentAlreadyRunning(RuntimeError):
+    pass
+
+
+# ---------------------------------------------------------------------------
+# 1. Recording control (Control)
+# ---------------------------------------------------------------------------
 
 
 class Control:
@@ -58,6 +83,7 @@ class Control:
                 raise AlreadyRecording(f"already recording (pid {pid}): {current.get('capture')}")
             event(log, logging.WARNING, "control.stale_active", pid=pid, capture=current.get("capture"))
         self.clear_stop()
+        self.clear_marks()
         write_json_atomic(self.active_path, {**info, "pid": os.getpid(), "since": now_iso()})
         event(log, logging.INFO, "control.claimed", capture=info.get("capture"))
 
@@ -67,7 +93,44 @@ class Control:
                 p.unlink()
             except FileNotFoundError:
                 pass
+        self.clear_marks()
         event(log, logging.INFO, "control.released")
+
+    def update_active(self, **fields) -> None:
+        """Merge `fields` (e.g. status="stopping") into our own active.json.
+        A file owned by another pid is never touched."""
+        current = self.read_active()
+        if current is None or int(current.get("pid", 0)) != os.getpid():
+            event(log, logging.WARNING, "control.update_not_owner", fields=fields)
+            return
+        write_json_atomic(self.active_path, {**current, **fields})
+
+    def take_marks(self) -> list[dict]:
+        """Consume every pending mark request, oldest first. An unreadable
+        request is logged and dropped rather than retried forever."""
+        out = []
+        for p in sorted(self.dir.glob(MARK_GLOB)):
+            try:
+                with p.open(encoding="utf-8") as fh:
+                    out.append(json.load(fh))
+            except (OSError, json.JSONDecodeError) as exc:
+                event(log, logging.WARNING, "control.mark_unreadable", path=str(p), error=str(exc))
+            try:
+                p.unlink()
+            except OSError as exc:
+                event(log, logging.WARNING, "control.mark_unlink_failed", path=str(p), error=str(exc))
+        if out:
+            event(log, logging.INFO, "control.marks_consumed", count=len(out))
+        return out
+
+    def clear_marks(self) -> None:
+        if not self.dir.exists():
+            return
+        for p in self.dir.glob(MARK_GLOB):
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
 
     def stop_requested(self) -> bool:
         if self.stop_path.exists():
@@ -111,6 +174,19 @@ class Control:
         event(log, logging.INFO, "control.stop_requested", pid=info.get("pid"))
         return info
 
+    def request_mark(self, source: str, label: str = "") -> dict:
+        """Ask the live recorder to drop a mark. Raises LookupError if none is live.
+        Returns the request as written (requested_at is this side's wall clock)."""
+        info = self.live_recording()
+        if info is None:
+            raise LookupError("nothing is recording")
+        self.dir.mkdir(parents=True, exist_ok=True)
+        req = {"requested_at": now_iso(), "source": source, "label": label}
+        name = f"mark-{time.time_ns():020d}-{os.getpid()}.json"
+        write_json_atomic(self.dir / name, req)      # temp + replace: the poller never sees half a file
+        event(log, logging.INFO, "control.mark_requested", source=source, label=label, pid=info.get("pid"))
+        return req
+
     def wait_finished(self, pid: int, timeout_s: float, poll_s: float = 0.2,
                       sleep: Callable[[float], None] = time.sleep,
                       clock: Callable[[], float] = time.monotonic) -> bool:
@@ -122,3 +198,131 @@ class Control:
                 return True
             sleep(poll_s)
         return False
+
+
+# ---------------------------------------------------------------------------
+# 2. Agent control (AgentControl)
+# ---------------------------------------------------------------------------
+
+
+class AgentControl:
+    """The resident agent's pidfile and command file, same pattern as Control.
+
+    The Windows named mutex (winapi.SingleInstance) is what actually keeps a
+    second agent out, race-free; agent.json is what `peep agent status|stop|
+    reload` read, and what a second agent names in its refusal."""
+
+    def __init__(self, state_dir: Path, pid_alive: Callable[[int], bool]):
+        self.dir = Path(state_dir)
+        self.path = self.dir / AGENT
+        self.command_path = self.dir / AGENT_COMMAND
+        self.pid_alive = pid_alive
+
+    def read(self) -> dict | None:
+        try:
+            with self.path.open(encoding="utf-8") as fh:
+                return json.load(fh)
+        except FileNotFoundError:
+            return None
+        except (OSError, json.JSONDecodeError) as exc:
+            event(log, logging.WARNING, "agent.pidfile_unreadable", error=str(exc))
+            return {"pid": 0, "unreadable": str(exc)}
+
+    def live(self) -> dict | None:
+        info = self.read()
+        if info and self.pid_alive(int(info.get("pid", 0))):
+            return info
+        return None
+
+    # -- agent side --------------------------------------------------------------
+
+    def claim(self, info: dict) -> None:
+        """Record this process as the agent. Refuses if another live agent holds
+        the file; replaces (and logs) a stale one. Clears a leftover command."""
+        self.dir.mkdir(parents=True, exist_ok=True)
+        current = self.read()
+        if current is not None and int(current.get("pid", 0)) != os.getpid():
+            pid = int(current.get("pid", 0))
+            if self.pid_alive(pid):
+                raise AgentAlreadyRunning(f"the peep agent is already running (pid {pid})")
+            event(log, logging.WARNING, "agent.stale_pidfile", pid=pid)
+        self._clear_command()
+        write_json_atomic(self.path, {**info, "pid": os.getpid(), "since": now_iso()})
+        event(log, logging.INFO, "agent.claimed", pid=os.getpid())
+
+    def update(self, **fields) -> None:
+        current = self.read() or {}
+        if int(current.get("pid", 0)) != os.getpid():
+            event(log, logging.WARNING, "agent.update_not_owner", fields=list(fields))
+            return
+        write_json_atomic(self.path, {**current, **fields})
+
+    def release(self) -> None:
+        current = self.read()
+        if current is not None and int(current.get("pid", 0)) == os.getpid():
+            try:
+                self.path.unlink()
+            except FileNotFoundError:
+                pass
+        self._clear_command()
+        event(log, logging.INFO, "agent.released")
+
+    def take_command(self) -> str | None:
+        """The pending command (consumed), or None. Unknown words are logged and dropped."""
+        try:
+            text = self.command_path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            event(log, logging.WARNING, "agent.command_unreadable", error=str(exc))
+            return None
+        self._clear_command()
+        if text not in AGENT_COMMANDS:
+            event(log, logging.WARNING, "agent.command_unknown", command=text)
+            return None
+        event(log, logging.INFO, "agent.command", command=text)
+        return text
+
+    def _clear_command(self) -> None:
+        try:
+            self.command_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    # -- client side (peep agent stop|reload) -------------------------------------
+
+    def send(self, command: str) -> dict:
+        if command not in AGENT_COMMANDS:
+            raise ValueError(f"unknown agent command {command!r}")
+        info = self.live()
+        if info is None:
+            raise LookupError("the peep agent is not running")
+        self.dir.mkdir(parents=True, exist_ok=True)
+        tmp = self.command_path.with_name(self.command_path.name + ".tmp")
+        tmp.write_text(command + "\n", encoding="utf-8")
+        os.replace(tmp, self.command_path)
+        event(log, logging.INFO, "agent.command_sent", command=command, pid=info.get("pid"))
+        return info
+
+    def wait_gone(self, pid: int, timeout_s: float, poll_s: float = 0.2,
+                  sleep: Callable[[float], None] = time.sleep,
+                  clock: Callable[[], float] = time.monotonic) -> bool:
+        deadline = clock() + timeout_s
+        while clock() < deadline:
+            if not self.pid_alive(pid):
+                return True
+            sleep(poll_s)
+        return not self.pid_alive(pid)
+
+    def wait_for(self, predicate: Callable[[dict], bool], timeout_s: float, poll_s: float = 0.2,
+                 sleep: Callable[[float], None] = time.sleep,
+                 clock: Callable[[], float] = time.monotonic) -> dict | None:
+        """Poll agent.json until `predicate(info)` holds for a live agent; the info, or None on timeout."""
+        deadline = clock() + timeout_s
+        while True:
+            info = self.live()
+            if info is not None and predicate(info):
+                return info
+            if clock() >= deadline:
+                return None
+            sleep(poll_s)

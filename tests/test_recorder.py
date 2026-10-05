@@ -99,7 +99,7 @@ class RecordFlowTest(RecorderHarness, unittest.TestCase):
         self.assertEqual(sc["timeline"]["stop_reason"], "terminal")
         self.assertIsNone(sc["trim"])
         # flash: start magenta, stop green, both stamped relative to the ffmpeg launch
-        self.assertEqual(self.flasher.calls, [("#FF00FF", 150), ("#00FF00", 150)])
+        self.assertEqual(self.flasher.calls, [("#FF00FF", 200), ("#00FF00", 200)])
         self.assertEqual(sc["flash"]["start"]["color"], "#FF00FF")
         self.assertEqual(sc["flash"]["stop"]["color"], "#00FF00")
         self.assertLess(sc["flash"]["start"]["since_ffmpeg_start_s"], sc["flash"]["stop"]["since_ffmpeg_start_s"])
@@ -179,7 +179,7 @@ class RecordFlowTest(RecorderHarness, unittest.TestCase):
         sc = catalog.read_sidecar(res.sidecar_path)
         self.assertEqual(sc["status"], "failed")
         self.assertTrue(any("Failed to capture" in l for l in sc["ffmpeg"]["stderr_tail"]))
-        self.assertEqual(self.flasher.calls, [("#FF00FF", 150)])     # no stop flash into a dead capture
+        self.assertEqual(self.flasher.calls, [("#FF00FF", 200)])     # no stop flash into a dead capture
         e = catalog.Catalog(self.root).last(include_failed=True)
         self.assertEqual(e.status, "failed")
         self.assertIsNone(catalog.Catalog(self.root).last())

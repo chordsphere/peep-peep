@@ -19,7 +19,11 @@ class DefaultsTest(unittest.TestCase):
         self.assertEqual(cfg.audio.device, "Microphone Array on SoundWire Device (6- Realtek XU)")
         self.assertEqual(cfg.flash.start_color, "#FF00FF")
         self.assertEqual(cfg.flash.stop_color, "#00FF00")
-        self.assertEqual(cfg.flash.duration_ms, 150)
+        self.assertEqual(cfg.flash.duration_ms, 200)       # raised from 150 after the 2026-10-04 smoke test
+        self.assertEqual(cfg.flash.mark_color, "#00FFFF")
+        self.assertEqual((cfg.agent.record_hotkey, cfg.agent.mark_hotkey, cfg.agent.discard_hotkey),
+                         ("Ctrl+Alt+R", "Ctrl+Alt+M", "Ctrl+Alt+X"))
+        self.assertTrue(cfg.agent.pill)
         self.assertEqual(cfg.output.container, "mp4")
 
     def test_root_falls_back_to_literal_without_userprofile(self):
@@ -27,7 +31,7 @@ class DefaultsTest(unittest.TestCase):
 
     def test_template_is_valid_toml_and_all_commented(self):
         data = tomllib.loads(c.TEMPLATE)
-        self.assertEqual(set(data), {"video", "audio", "flash", "output", "ffmpeg"})
+        self.assertEqual(set(data), {"video", "audio", "flash", "output", "ffmpeg", "agent"})
         self.assertTrue(all(v == {} for v in data.values()))
         self.assertEqual(c.from_mapping(data).video, c.Config().video)
 
@@ -94,6 +98,34 @@ class OverrideTest(TempDirMixin, unittest.TestCase):
         self.assertIsNone(c.parse_scale("native"))
         self.assertEqual(c.parse_scale("1920x1200"), (1920, 1200))
 
+
+
+class AgentConfigTest(unittest.TestCase):
+    """Session B's [agent] section and the mark colour."""
+
+    def test_overrides(self):
+        cfg = c.from_mapping({"agent": {"record_hotkey": "Ctrl+Shift+F9", "pill": False, "pill_position": "bottom-left",
+                                        "dialog": False, "hotkey_retry_s": 0}, "flash": {"mark_color": "#FFFF00"}})
+        self.assertEqual((cfg.agent.record_hotkey, cfg.agent.pill, cfg.agent.pill_position, cfg.agent.dialog),
+                         ("Ctrl+Shift+F9", False, "bottom-left", False))
+        self.assertEqual(cfg.flash.mark_color, "#FFFF00")
+
+    def test_invalid_agent_values(self):
+        for data, why in (({"agent": {"pill_position": "middle"}}, "pill_position"),
+                          ({"agent": {"pill_margin_px": -1}}, "pill_margin_px"),
+                          ({"agent": {"hotkey_retry_s": 99999}}, "hotkey_retry_s"),
+                          ({"agent": {"pill": "yes"}}, "agent.pill must be bool"),
+                          ({"agent": {"tray": True}}, r"unknown key\(s\) in \[agent\]"),
+                          ({"agent": {"discard_hotkey": "Ctrl+Alt+M"}}, "discard_hotkey and mark_hotkey"),
+                          ({"flash": {"mark_color": "cyan"}}, "mark_color must be #RRGGBB"),
+                          ({"flash": {"mark_color": "#ff00ff"}}, "must all differ")):
+            with self.subTest(data=data), self.assertRaisesRegex(c.ConfigError, why):
+                c.from_mapping(data)
+
+    def test_template_documents_every_agent_key(self):
+        for f in c.AgentConfig.__dataclass_fields__:
+            self.assertIn(f"# {f} = ", c.TEMPLATE)
+        self.assertIn("# mark_color = ", c.TEMPLATE)
 
 if __name__ == "__main__":
     unittest.main()

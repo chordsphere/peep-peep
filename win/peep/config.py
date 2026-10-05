@@ -7,9 +7,9 @@ config key that silently falls back to a default is exactly the silent
 skip AGENT.md calls a bug.
 
 Sections:
-  1. Defaults + dataclasses     (~line 26)
-  2. Loading + validation       (~line 133)
-  3. Template                   (~line 239)
+  1. Defaults + dataclasses     (~line 27)
+  2. Loading + validation       (~line 160)
+  3. Template                   (~line 290)
 """
 
 from __future__ import annotations
@@ -78,7 +78,8 @@ class FlashConfig:
     enabled: bool = True
     start_color: str = "#FF00FF"         # magenta
     stop_color: str = "#00FF00"          # green: magenta's complement, measured exact through the pipeline
-    duration_ms: int = 150               # measured: 4-5 frames at 30 fps
+    mark_color: str = "#00FFFF"          # cyan: a mark (agent hotkey or `peep mark`), distinct from both
+    duration_ms: int = 200               # 150 measured 4-5 frames at 30 fps; 200 for margin (smoke test, 2026-10-04)
     settle_ms: int = 400                 # keep recording this long after the stop flash before sending q
     lead_ms: int = 300                   # wait after ffmpeg reports ready before the start flash
 
@@ -96,6 +97,20 @@ class FfmpegConfig:
 
 
 @dataclass(frozen=True)
+class AgentConfig:
+    """Session B's resident agent (`peep agent run`). Hotkeys are chords like
+    "Ctrl+Alt+R"; see hotkeys.parse_chord for the accepted key names."""
+    record_hotkey: str = "Ctrl+Alt+R"    # start a recording / stop it (then the naming dialog)
+    mark_hotkey: str = "Ctrl+Alt+M"      # drop a mark (cyan flash + sidecar entry) while recording
+    discard_hotkey: str = "Ctrl+Alt+X"   # stop and delete the current take
+    hotkey_retry_s: int = 60             # keep retrying chords that failed to register (login race)
+    dialog: bool = True                  # false: hotkey stops keep the automatic name, no dialog
+    pill: bool = True                    # the REC pill (excluded from capture; probe-verified 2026-10-05)
+    pill_position: str = "top-right"     # top-right | top-left | top-center | bottom-right | bottom-left | bottom-center
+    pill_margin_px: int = 24
+
+
+@dataclass(frozen=True)
 class Config:
     root: str = field(default_factory=default_root)
     default_collection: str = "inbox"
@@ -105,6 +120,7 @@ class Config:
     flash: FlashConfig = field(default_factory=FlashConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     ffmpeg: FfmpegConfig = field(default_factory=FfmpegConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
     source: str = "defaults"             # where this config came from (path or "defaults"); not a TOML key
 
     def root_path(self) -> Path:
@@ -138,7 +154,8 @@ class ConfigError(ValueError):
 
 
 _SECTIONS = {"video": VideoConfig, "audio": AudioConfig, "flash": FlashConfig,
-             "output": OutputConfig, "ffmpeg": FfmpegConfig}
+             "output": OutputConfig, "ffmpeg": FfmpegConfig, "agent": AgentConfig}
+PILL_POSITIONS = ("top-right", "top-left", "top-center", "bottom-right", "bottom-left", "bottom-center")
 _TOP_KEYS = {"root": str, "default_collection": str, "log_level": str}
 
 
@@ -202,9 +219,13 @@ def validate(cfg: Config) -> None:
     parse_scale(v.scale)
     if v.gop_seconds < 1:
         raise ConfigError("video.gop_seconds must be >= 1")
-    for name in ("start_color", "stop_color"):
+    for name in ("start_color", "stop_color", "mark_color"):
         if not _HEX_COLOR.match(getattr(f, name)):
             raise ConfigError(f"flash.{name} must be #RRGGBB, got {getattr(f, name)!r}")
+    colors = [f.start_color.upper(), f.stop_color.upper(), f.mark_color.upper()]
+    if len(set(colors)) != 3:
+        raise ConfigError(f"flash start/stop/mark colours must all differ (session C tells them apart), "
+                          f"got {', '.join(colors)}")
     if not 20 <= f.duration_ms <= 2000:
         raise ConfigError(f"flash.duration_ms must be 20..2000, got {f.duration_ms}")
     if a.enabled and not a.device.strip():
@@ -215,6 +236,21 @@ def validate(cfg: Config) -> None:
         raise ConfigError(f"root must be on the Windows filesystem, never under \\\\wsl.localhost: {cfg.root!r}")
     if cfg.log_level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR"):
         raise ConfigError(f"log_level must be DEBUG/INFO/WARNING/ERROR, got {cfg.log_level!r}")
+    validate_agent(cfg.agent)
+
+
+def validate_agent(ag: AgentConfig) -> None:
+    from . import hotkeys     # pure module; imported here to keep config importable on its own
+    try:
+        hotkeys.table_from_agent_config(ag)
+    except hotkeys.HotkeyError as exc:
+        raise ConfigError(f"[agent] {exc}") from exc
+    if ag.pill_position not in PILL_POSITIONS:
+        raise ConfigError(f"agent.pill_position must be one of {PILL_POSITIONS}, got {ag.pill_position!r}")
+    if not 0 <= ag.pill_margin_px <= 1000:
+        raise ConfigError(f"agent.pill_margin_px must be 0..1000, got {ag.pill_margin_px}")
+    if not 0 <= ag.hotkey_retry_s <= 3600:
+        raise ConfigError(f"agent.hotkey_retry_s must be 0..3600, got {ag.hotkey_retry_s}")
 
 
 def load(path: Path | None = None, environ: dict[str, str] | None = None) -> Config:
@@ -271,7 +307,8 @@ TEMPLATE = '''\
 # enabled = true
 # start_color = "#FF00FF"
 # stop_color = "#00FF00"
-# duration_ms = 150
+# mark_color = "#00FFFF"         # marks (agent hotkey / `peep mark`)
+# duration_ms = 200
 # settle_ms = 400
 # lead_ms = 300
 
@@ -282,4 +319,14 @@ TEMPLATE = '''\
 # path = "ffmpeg"
 # startup_timeout_s = 10.0
 # stop_timeout_s = 20.0
+
+[agent]                           # the resident agent (`peep agent install`); `peep agent reload` after editing
+# record_hotkey = "Ctrl+Alt+R"    # start / stop (then the naming dialog)
+# mark_hotkey = "Ctrl+Alt+M"      # drop a mark while recording
+# discard_hotkey = "Ctrl+Alt+X"   # stop and delete the take
+# hotkey_retry_s = 60             # keep retrying a chord another app holds, for this long after start
+# dialog = true                   # false: hotkey stops keep the automatic name
+# pill = true                     # the REC pill (hidden from the recording itself)
+# pill_position = "top-right"     # top-right | top-left | top-center | bottom-right | bottom-left | bottom-center
+# pill_margin_px = 24
 '''

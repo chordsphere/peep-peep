@@ -9,17 +9,19 @@ On disk, under the root (default C:/Users/chord/Videos/peep):
 
 The catalog is the index: `ls` and `last` fold its events and never walk
 directories. Events are `recorded` (a finished recording), `failed` (a
-capture that did not finish cleanly; its files are kept for inspection)
-and `renamed`. Every recording has a `uid` that survives renames, so the
-fold keys on it.
+capture that did not finish cleanly; its files are kept for inspection),
+`renamed`, and `discarded` (session B: the take was deleted on purpose;
+the fold drops it). Every recording has a `uid` that survives renames, so
+the fold keys on it.
 
 The sidecar reserves `crop` and `marks` for session C (per-collection
 crop rectangle, mark-based cuts) and records `trim: null` until C trims.
 
 Sections:
-  1. Sidecar                    (~line 44)
-  2. Catalog events + fold      (~line 116)
-  3. Rename                     (~line 223)
+  1. Sidecar                    (~line 46)
+  2. Catalog events + fold      (~line 118)
+  3. Rename                     (~line 240)
+  4. Discard                    (~line 290)
 """
 
 from __future__ import annotations
@@ -188,7 +190,22 @@ class Catalog:
                 e.file = ev.get("to", e.file)
                 e.collection = ev.get("collection", e.collection)
                 e.title = ev.get("title", e.title)
+            elif kind == "discarded":
+                state.pop(uid, None)
         return list(state.values())
+
+    def recent_collections(self, limit: int = 10) -> list[str]:
+        """Collections that hold recordings now, most recently active first
+        (a recording's latest event, a rename included, dates its current
+        collection). A collection emptied by moves or discards drops out.
+        For the stop dialog's picker."""
+        current = {e.uid: e.collection for e in self.entries()}
+        out: list[str] = []
+        for ev in reversed(self.events()):
+            coll = current.get(ev.get("uid"))
+            if coll and coll not in out:
+                out.append(coll)
+        return out[:limit]
 
     def last(self, include_failed: bool = False) -> Entry | None:
         """The most recently recorded entry (by catalog order, not rename order)."""
@@ -269,3 +286,47 @@ def rename(root: Path, ref: str, new_name: str, collection: str | None = None) -
                 "collection": dest_collection, "title": new_name.strip()})
     entry.file, entry.collection, entry.title = rel, dest_collection, new_name.strip()
     return entry
+
+
+# ---------------------------------------------------------------------------
+# 4. Discard
+# ---------------------------------------------------------------------------
+
+
+def discard(root: Path, ref: str, reason: str = "user") -> Entry:
+    """Delete a recording on purpose (session B's discard hotkey / dialog):
+    the media file, its sidecar and any leftover capture go, and a
+    `discarded` event is appended so the fold forgets it. A file already
+    missing is logged, not fatal: the intent is "this take is gone".
+    A file that cannot be deleted (open in a player: WinError 32) raises
+    before the event is written, so the catalog never claims a deletion
+    that did not happen."""
+    cat = Catalog(root)
+    entry = cat.resolve(ref) if ref == "last" or len(ref) < 32 else _resolve_uid(cat, ref)
+    media = entry.media_path(root) if entry.file else None
+    targets = []
+    if media is not None:
+        targets += [media, sidecar_path(media)]
+        stem = sidecar_path(media).stem
+        targets += [media.with_name(stem + suffix) for suffix in naming.OWNED_SUFFIXES]
+    seen, removed = set(), []
+    for t in targets:
+        if t in seen:
+            continue
+        seen.add(t)
+        if t.exists():
+            os.remove(t)
+            removed.append(t.name)
+            event(log, logging.INFO, "file.discard", path=str(t))
+    if not removed:
+        event(log, logging.WARNING, "discard.nothing_on_disk", uid=entry.uid, file=entry.file)
+    cat.append({"event": "discarded", "uid": entry.uid, "file": entry.file, "collection": entry.collection,
+                "title": entry.title, "reason": reason, "removed": removed})
+    return entry
+
+
+def _resolve_uid(cat: Catalog, uid: str) -> Entry:
+    for e in cat.entries():
+        if e.uid == uid:
+            return e
+    raise LookupError(f"no recording with uid {uid}")

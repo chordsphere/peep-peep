@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 LOG_FILE_NAME = "peep.log"
+AGENT_LOG_FILE_NAME = "agent.log"    # the resident agent's own rotating log, beside peep.log (session B)
 MAX_BYTES = 2 * 1024 * 1024
 BACKUP_COUNT = 5
 _BARE = re.compile(r"^[A-Za-z0-9_.:/\\@+-]+$")
@@ -68,7 +69,8 @@ class _ConsoleFormatter(logging.Formatter):
         return f"peep: {record.levelname.lower()}: {record.getMessage()}"
 
 
-def setup_logging(log_dir: Path, level: str = "INFO", console: bool = True) -> Path:
+def setup_logging(log_dir: Path, level: str = "INFO", console: bool = True,
+                  file_name: str = LOG_FILE_NAME) -> Path:
     """Configure the `peep` logger tree once per process; returns the log path.
 
     Creates `log_dir` if needed. If the directory cannot be created the
@@ -83,7 +85,7 @@ def setup_logging(log_dir: Path, level: str = "INFO", console: bool = True) -> P
     for h in list(root.handlers):
         root.removeHandler(h)
         h.close()
-    path = Path(log_dir) / LOG_FILE_NAME
+    path = Path(log_dir) / file_name
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         fh = logging.handlers.RotatingFileHandler(path, maxBytes=MAX_BYTES, backupCount=BACKUP_COUNT,
@@ -93,7 +95,7 @@ def setup_logging(log_dir: Path, level: str = "INFO", console: bool = True) -> P
     except OSError as exc:
         print(f"peep: error: cannot open log file {path}: {exc}; logging to stderr only", file=sys.stderr)
         path = None
-    if console:
+    if console and sys.stderr is not None:     # pythonw.exe (the agent) has no stderr at all
         ch = logging.StreamHandler(sys.stderr)
         ch.setLevel(logging.WARNING)
         # Warnings only while the file log works: every error path ends at the CLI,
