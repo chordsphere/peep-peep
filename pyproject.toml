@@ -1,0 +1,13 @@
+# peep-peep is not pip-installed: the Windows package (win/peep) is copied
+# into %LOCALAPPDATA%\peep\app by `peep install`, and the WSL shim (bin/peep)
+# is a single script. This file only carries project metadata and pytest's
+# configuration.
+
+[project]
+name = "peep-peep"
+version = "0.1.0"
+description = "Low-friction screen recorder for one Windows 11 + WSL laptop: ffmpeg capture engine, naming/catalog storage, WSL shim"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

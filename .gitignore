@@ -35,3 +35,6 @@ id_dsa
 .aws/credentials
 .npmrc
 .pypirc
+
+# Test runner cache (pytest)
+.pytest_cache/
