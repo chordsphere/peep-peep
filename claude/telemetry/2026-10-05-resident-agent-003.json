@@ -1,0 +1,295 @@
+{
+  "record_version": 1,
+  "session_id": "2026-10-05-resident-agent-003",
+  "created_at": "2026-10-05T02:12:27+00:00",
+  "attempts": [
+    {
+      "at": "2026-10-05T02:12:27+00:00",
+      "outcome": "opened",
+      "command": "pack",
+      "closure_reason": null,
+      "tarball": null,
+      "validation": null,
+      "scope_kind": "write-forecast",
+      "scope": [
+        "."
+      ],
+      "overridden_paths": [],
+      "overridden_path_sources": {},
+      "required_check_overrides": [],
+      "base_drift_overrides": [],
+      "sandbox_escaped": false,
+      "network_grant_exercised": false,
+      "sandbox_confined": true,
+      "sandbox_off_source": null,
+      "cost": {
+        "tokens_in": null,
+        "tokens_out": null,
+        "usd": null,
+        "model_tier": null
+      },
+      "change_paths": [],
+      "feedback": null,
+      "log": ".bale/logs/2026-10-05-resident-agent-003.log",
+      "bundle": {
+        "stem": "2026-10-05-resident-agent-v2",
+        "brief_sha256": "e63aad3e3836376c6f68123059940cab6cab1fad3b238ac94a95621ff9f26a88",
+        "checkpoint_sha256": null,
+        "manifest_sha256": "46b61247eb0db79c652adf770fe532c58cd01546f7ba65850b65fdab06cc8b9c"
+      },
+      "provenance": {
+        "work_class": "code",
+        "packer": "chordsphere",
+        "packed_at": "2026-10-05T02:12:27+00:00"
+      }
+    },
+    {
+      "at": "2026-10-05T12:07:15+00:00",
+      "outcome": "applied",
+      "command": "apply",
+      "closure_reason": null,
+      "tarball": "response-2026-10-05-resident-agent-003.tar.gz",
+      "validation": {
+        "state": "PASS",
+        "exit_code": 0,
+        "claims": {
+          "unit tests (python3 -m unittest discover -s tests -t .)": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "session: flash.duration_ms default is 200, mark colour cyan": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "session: B's modules import with tkinter unavailable (WSL-safe)": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "session: RecordRequest carries foreground + origin; sidecar schema still peep.sidecar/1": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "session: no event() call in B's modules passes a reserved keyword (log/level/name)": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "session: A's untouched modules are byte-identical (audio path in ffmpeg_cmd.py included)": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "session: shim help lists mark and agent": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "session: bin/peep is executable": {
+            "value": "pass",
+            "claim_basis": "observed"
+          }
+        },
+        "claim_verdict": {
+          "unit tests (python3 -m unittest discover -s tests -t .)": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "session: flash.duration_ms default is 200, mark colour cyan": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "session: B's modules import with tkinter unavailable (WSL-safe)": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "session: RecordRequest carries foreground + origin; sidecar schema still peep.sidecar/1": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "session: no event() call in B's modules passes a reserved keyword (log/level/name)": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "session: A's untouched modules are byte-identical (audio path in ffmpeg_cmd.py included)": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "session: shim help lists mark and agent": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "session: bin/peep is executable": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          }
+        },
+        "reconciliation_parsed": true,
+        "validation_will_run": [
+          "file syntax (ast parse of win/, tests/ and bin/peep)",
+          "unit tests (python3 -m unittest discover -s tests -t .)",
+          "session: flash.duration_ms default is 200, mark colour cyan",
+          "session: B's modules import with tkinter unavailable (WSL-safe)",
+          "session: RecordRequest carries foreground + origin; sidecar schema still peep.sidecar/1",
+          "session: no event() call in B's modules passes a reserved keyword (log/level/name)",
+          "session: A's untouched modules are byte-identical (audio path in ffmpeg_cmd.py included)",
+          "session: shim help lists mark and agent",
+          "session: bin/peep is executable"
+        ]
+      },
+      "scope_kind": "write-forecast",
+      "scope": [
+        "."
+      ],
+      "overridden_paths": [],
+      "overridden_path_sources": {},
+      "required_check_overrides": [],
+      "base_drift_overrides": [],
+      "sandbox_escaped": false,
+      "network_grant_exercised": false,
+      "sandbox_confined": true,
+      "sandbox_off_source": null,
+      "cost": {
+        "tokens_in": null,
+        "tokens_out": null,
+        "usd": null,
+        "model_tier": null
+      },
+      "change_paths": [
+        "README.md",
+        "bin/peep",
+        "tests/test_agent.py",
+        "tests/test_agentcli.py",
+        "tests/test_catalog.py",
+        "tests/test_config.py",
+        "tests/test_dialog.py",
+        "tests/test_hotkeys.py",
+        "tests/test_lifecycle.py",
+        "tests/test_marks.py",
+        "tests/test_recorder.py",
+        "tests/test_shim.py",
+        "win/peep/agent.py",
+        "win/peep/agentcli.py",
+        "win/peep/catalog.py",
+        "win/peep/cli.py",
+        "win/peep/config.py",
+        "win/peep/control.py",
+        "win/peep/dialog.py",
+        "win/peep/hotkeys.py",
+        "win/peep/lifecycle.py",
+        "win/peep/logsetup.py",
+        "win/peep/pill.py",
+        "win/peep/recorder.py",
+        "win/peep/ui.py",
+        "win/peep/winapi.py"
+      ],
+      "feedback": {
+        "mechanical": {
+          "response_kind": "normal",
+          "schema_valid": true,
+          "mirror_agreement": {
+            "changes_to_files": true,
+            "files_to_changes": true
+          },
+          "claims_subset": true,
+          "provenance": {
+            "bale_version": "0.4.45",
+            "contract_docs": {
+              "AGENT.md": "5124250b3d6362ae362801f89e2c0498a6e493c638a398de2f4c3d13d6c12285",
+              "TARBALL.md": "f6c3326ee3c827498371886ead46349b50fa4f448e2facb0d40ee4d137ce234a",
+              "DOCS.md": "90cc9aad0670610b7865a54db33975103580cdd3354d000b8db07f8a6e956d0c",
+              "CODE.md": "49a145323bfc472a22dd8be56565d6e7767fd1ffbd33c36cda95e7e3e149ab75",
+              "PLANNER.md": "5af584b98ed0591b57fbb146baf1441f8130a894e050882d22b3cd62c5cd17d5"
+            },
+            "packer": "chordsphere",
+            "work_class": "code",
+            "checkpoint": null,
+            "checkpoint_scope_admitted": false,
+            "packed_at": "2026-10-05T02:12:27+00:00",
+            "base_files": {
+              ".gitignore": "be556e2cd3057567ca2806a9a3f877e080beede941b98dc77150b7813c20f40e",
+              "README.md": "efe91f16b47c437ef91fc2cdab9c1c0cb02e18b9a9cb2e498761a2635be07138",
+              "bin/peep": "cd192925dc4a6ab6d107a26833ad61e0f62f6af4cef3eb0da7bcb87a33b5596f",
+              "claude/responses/2026-10-05-engine-storage-core-002/notes.md": "5ac2235ed730692ab5fcfbb67c81a03676f2040d666b1b707cd73a53688424ed",
+              "claude/telemetry/2026-10-05-engine-storage-core-002.json": "3d19cdf2556dd26e6a4c669b7dfea5271783e5f46d3a6251d1665c0bf9f31d3c",
+              "pyproject.toml": "583f0f265e8cb543625e5679788544f772e185cde9fbf408b6b96e4010482af3",
+              "start.md": "8d7235777c4466098fcbee355c33af1a7224b8f7b7e845ee718d8f6d6442c682",
+              "tests/__init__.py": "9901684a56e356e12bafef6b13270a145e8b3e8eb87ed3311bc39fc2b128447d",
+              "tests/fake_ffmpeg.py": "521bff234b57fa64a2fd3d6d56585b138443572325bb4d2bb8a50267ed6d5fde",
+              "tests/test_catalog.py": "a4ab41e5fad4fbeec5cabe068a3f019682c677dc578165d752c3e40441ef100c",
+              "tests/test_cli.py": "5a0332ac65cd619528cd6f3808dc3d2f5f7b3d2315a27af3161b321d18c806d3",
+              "tests/test_config.py": "12f4325b2a4b5818d6776e7c008d3ee4ec8ea214b6014411600f77e1334077fb",
+              "tests/test_control.py": "abd0687a18df4b94d6e0bae4776b500f0cfed7e85726134f74322538ddc3dfed",
+              "tests/test_doctor.py": "b56f4ff601ab58163a347a21dba71b0bb51714d3297788ff0d738fcae907cc53",
+              "tests/test_ffmpeg_cmd.py": "69a6a431ccde75181422b858c740d24be610c2f53a5dc93b600df1108cec4b53",
+              "tests/test_naming.py": "02245a325b8eccea642863658c9217d399b1c9057e4d32f1b52c50a5cd0cfde8",
+              "tests/test_recorder.py": "87e0d449773915e68d9ff9b70ffb81184458d11b4ae35e8466cf2c3c08d40be1",
+              "tests/test_shim.py": "c61da1a9447c7e46f9b343ea6c8b23e45c3e607437191a5edd562cb015520780",
+              "win/peep/__init__.py": "6e87c0cdb7018a8cfcb35ec7b5d0cb8aaee6b0b52a3b5a64dd61f7c01ee1bbd4",
+              "win/peep/__main__.py": "f5c32d04986abec782824be436da94704abd3a940faa65868b21928f00ef3e46",
+              "win/peep/catalog.py": "bc013cbafaaaa220b5370833eaf031379aff857a156e6bedf3b6860b7db2bc8a",
+              "win/peep/cli.py": "f228d899cfab1a85da310a0923f585be45048164bd7d05f6d35b136d55bbb5fc",
+              "win/peep/config.py": "74433dd04b050fbaafb9685f673c0382f200a0ab37d71d45e9874355fa1d0b03",
+              "win/peep/control.py": "4fa1dfdc8a319084f72cef4aaf3595c75b957b4f078add69154e25eb01a563ac",
+              "win/peep/doctor.py": "55f2487406eae425030488d7098f6a9557053f5a52f6b45a39caaa6fefb7562f",
+              "win/peep/ffmpeg_cmd.py": "1756819b27c171a993c4b18bb461d80352f86985298b197854bfff139a16d386",
+              "win/peep/flash.py": "ad05b0e3dcd18928cbfce56485fd1131f20522753c08ef92930b543474029f52",
+              "win/peep/logsetup.py": "2bdd90014f990b81417b4575b44981e215744a3514dc19ed47ee8901371559e8",
+              "win/peep/naming.py": "cf3fa74e5632ca0deca88eb418a82a5c49d6873b0ac0bf7af7e921e17f53c672",
+              "win/peep/paths.py": "6d9956681597493d89f8193464204ba36d894dd62ae96513f886ac84e3f3157b",
+              "win/peep/recorder.py": "84dca064188923a3edf1bde1f4095c1a9b100fecf9995cc14c7c9289659ffe1f",
+              "win/peep/winapi.py": "639eecf2a0c3db1eb9ae5126a09fdbf9b2056884cafa615a8cc2367d410cea02",
+              "win/peepw.py": "4d1235bb3d52360257fdb3aaf15cc64179150b380c83645236ccd924f1eaeb55"
+            },
+            "model_identity": "anthropic:claude-opus-5-5"
+          }
+        },
+        "self_reported": {
+          "assumptions": [
+            "Terminal-started recordings stopped by the agent's record hotkey get no dialog (the hotkey acts like `peep stop`); the dialog is for recordings the agent started \u2014 the manifest constraint read literally",
+            "Pressing the record hotkey while the naming dialog is open keeps the automatic name (Esc semantics) and starts the next take",
+            "Last-used collection means the collection the agent's last dialog outcome left a take in, persisted in %LOCALAPPDATA%\\peep\\agent-prefs.json; terminal recordings do not change it"
+          ],
+          "judgment_calls": [
+            "Startup entry is a .lnk written by PowerShell's WScript.Shell COM object, not a .cmd (a .cmd flashes a console at every login)",
+            "Marks: one request file per press (mark-<ns>-<pid>.json) rather than a single `mark` file, so two presses inside one 100 ms poll are two marks; `t` is the press time from the request's wall clock, not the poll time",
+            "Delete in the dialog is the discard key in both fields (Backspace still edits); Up/Down cycle collections from either field so they are one keystroke away",
+            "The agent's own commands (stop, reload) ride a second control file, agent-command, beside A's stop-request; agent.json is its pidfile/status; a named mutex is the race-free single-instance guard",
+            "Hotkeys live on a dedicated Win32 message-loop thread, not Tk's; every piece of agent logic runs on the Tk thread through a non-reentrant dispatcher so A's flash update() loop cannot re-enter it",
+            "catalog gains a `discarded` event and the fold drops it (A's fold ignored unknown events, so a discarded take would otherwise stay listed)",
+            "The installed-copy staleness check runs only when `wsl --list --running` names the distro, because touching \\\\wsl.localhost would boot WSL at login",
+            "Overlays (pill and toasts) are secured with capture exclusion while fully transparent, before anything is drawn"
+          ],
+          "budget_pressure": "none",
+          "includes_missing": [],
+          "compaction_occurred": {
+            "occurred": false,
+            "disclosure_ref": null
+          },
+          "docs_read": [
+            "manifest.json",
+            "AGENT.md META through \u00a711.2",
+            "README.md (the brief)",
+            "TARBALL.md sections 1, 2, 4, 5, 7, 10 and the \u00a73.2 expects_probe row",
+            "the request's project files in full: claude/responses/2026-10-05-engine-storage-core-002/notes.md, README.md, start.md, win/, bin/peep, tests/"
+          ]
+        }
+      },
+      "log": ".bale/logs/2026-10-05-resident-agent-003.log",
+      "clarification": {
+        "rounds": 0,
+        "records": []
+      },
+      "corrects": null,
+      "checkpoint": {
+        "configured": false
+      }
+    }
+  ],
+  "updated_at": "2026-10-05T12:07:15+00:00",
+  "outcome": "applied"
+}
