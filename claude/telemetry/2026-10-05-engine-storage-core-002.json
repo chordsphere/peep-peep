@@ -1,0 +1,237 @@
+{
+  "record_version": 1,
+  "session_id": "2026-10-05-engine-storage-core-002",
+  "created_at": "2026-10-05T00:54:11+00:00",
+  "attempts": [
+    {
+      "at": "2026-10-05T00:54:11+00:00",
+      "outcome": "opened",
+      "command": "pack",
+      "closure_reason": null,
+      "tarball": null,
+      "validation": null,
+      "scope_kind": "write-forecast",
+      "scope": [
+        "."
+      ],
+      "overridden_paths": [],
+      "overridden_path_sources": {},
+      "required_check_overrides": [],
+      "base_drift_overrides": [],
+      "sandbox_escaped": false,
+      "network_grant_exercised": false,
+      "sandbox_confined": true,
+      "sandbox_off_source": null,
+      "cost": {
+        "tokens_in": null,
+        "tokens_out": null,
+        "usd": null,
+        "model_tier": null
+      },
+      "change_paths": [],
+      "feedback": null,
+      "log": ".bale/logs/2026-10-05-engine-storage-core-002.log",
+      "bundle": {
+        "stem": "2026-10-05-engine-storage-core",
+        "brief_sha256": "b82600d8320faed1f518fb6eef80d5247cabfc2a20023fc06cd1c5190596fc3d",
+        "checkpoint_sha256": null,
+        "manifest_sha256": "5016901163ce291a318042b86af4f349c013b2e8478ca550351863af6173d54f"
+      },
+      "provenance": {
+        "work_class": "code",
+        "packer": "chordsphere",
+        "packed_at": "2026-10-05T00:54:11+00:00"
+      }
+    },
+    {
+      "at": "2026-10-05T01:34:25+00:00",
+      "outcome": "applied",
+      "command": "apply",
+      "closure_reason": null,
+      "tarball": "response-2026-10-05-engine-storage-core-002.tar.gz",
+      "validation": {
+        "state": "PASS",
+        "exit_code": 0,
+        "claims": {
+          "index header coherence": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "stdlib-only imports (win/, bin/peep)": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "default config and capture argv match the probe": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "tests (pytest or unittest fallback)": {
+            "value": "pass",
+            "claim_basis": "observed"
+          }
+        },
+        "claim_verdict": {
+          "index header coherence": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "stdlib-only imports (win/, bin/peep)": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "default config and capture argv match the probe": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "tests (pytest or unittest fallback)": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          }
+        },
+        "reconciliation_parsed": true,
+        "validation_will_run": [
+          "file syntax (python, toml)",
+          "bin/peep is executable",
+          "index header coherence",
+          "stdlib-only imports (win/, bin/peep)",
+          "default config and capture argv match the probe",
+          "tests (pytest or unittest fallback)"
+        ]
+      },
+      "scope_kind": "write-forecast",
+      "scope": [
+        "."
+      ],
+      "overridden_paths": [],
+      "overridden_path_sources": {},
+      "required_check_overrides": [],
+      "base_drift_overrides": [],
+      "sandbox_escaped": false,
+      "network_grant_exercised": false,
+      "sandbox_confined": true,
+      "sandbox_off_source": null,
+      "cost": {
+        "tokens_in": null,
+        "tokens_out": null,
+        "usd": null,
+        "model_tier": null
+      },
+      "change_paths": [
+        ".gitignore",
+        "README.md",
+        "bin/peep",
+        "pyproject.toml",
+        "tests/__init__.py",
+        "tests/fake_ffmpeg.py",
+        "tests/test_catalog.py",
+        "tests/test_cli.py",
+        "tests/test_config.py",
+        "tests/test_control.py",
+        "tests/test_doctor.py",
+        "tests/test_ffmpeg_cmd.py",
+        "tests/test_naming.py",
+        "tests/test_recorder.py",
+        "tests/test_shim.py",
+        "win/peep/__init__.py",
+        "win/peep/__main__.py",
+        "win/peep/catalog.py",
+        "win/peep/cli.py",
+        "win/peep/config.py",
+        "win/peep/control.py",
+        "win/peep/doctor.py",
+        "win/peep/ffmpeg_cmd.py",
+        "win/peep/flash.py",
+        "win/peep/logsetup.py",
+        "win/peep/naming.py",
+        "win/peep/paths.py",
+        "win/peep/recorder.py",
+        "win/peep/winapi.py",
+        "win/peepw.py"
+      ],
+      "feedback": {
+        "mechanical": {
+          "response_kind": "normal",
+          "schema_valid": true,
+          "mirror_agreement": {
+            "changes_to_files": true,
+            "files_to_changes": true
+          },
+          "claims_subset": true,
+          "provenance": {
+            "bale_version": "0.4.45",
+            "contract_docs": {
+              "AGENT.md": "5124250b3d6362ae362801f89e2c0498a6e493c638a398de2f4c3d13d6c12285",
+              "TARBALL.md": "f6c3326ee3c827498371886ead46349b50fa4f448e2facb0d40ee4d137ce234a",
+              "DOCS.md": "90cc9aad0670610b7865a54db33975103580cdd3354d000b8db07f8a6e956d0c",
+              "CODE.md": "49a145323bfc472a22dd8be56565d6e7767fd1ffbd33c36cda95e7e3e149ab75",
+              "PLANNER.md": "5af584b98ed0591b57fbb146baf1441f8130a894e050882d22b3cd62c5cd17d5"
+            },
+            "packer": "chordsphere",
+            "work_class": "code",
+            "checkpoint": null,
+            "checkpoint_scope_admitted": false,
+            "packed_at": "2026-10-05T00:54:11+00:00",
+            "base_files": {
+              ".gitignore": "3097e030200f903e6fda475e2e8f21aafcbac79690d8d11527d229a6963d45bb",
+              "start.md": "8d7235777c4466098fcbee355c33af1a7224b8f7b7e845ee718d8f6d6442c682"
+            },
+            "model_identity": "anthropic:claude-opus-5-5"
+          },
+          "linkage": {
+            "kind": "probe",
+            "point": "pre-build",
+            "depends_on": null
+          }
+        },
+        "self_reported": {
+          "assumptions": [
+            "model_identity is the session's configured model id; the serving model is not independently visible",
+            "ffmpeg's dshow and ddagrab timestamps line up closely enough with -audio_buffer_size 50 and per-input start normalisation; audio.offset_ms is the correction if the smoke test shows drift",
+            "a python.exe child started from WSL with start_new_session=True still relays its stdout to the terminal (PEEP_REC_NO_SETSID=1 is the escape hatch if not)"
+          ],
+          "judgment_calls": [
+            "default video chain is the GPU-only qsv path with vpp_qsv BT.709 conversion, chosen from a second probe that read colours back from captured frames; the plain zero-copy chain tagged output gbr/full-range",
+            "capture to Matroska (<stem>.recording.mkv), remux to MP4 on clean stop; a failed capture keeps a playable .mkv catalogued as failed",
+            "stop flash is green (#00FF00), magenta's complement and measured exact through the pipeline",
+            "IPC is control files under %LOCALAPPDATA%\\peep\\state rather than a 127.0.0.1 socket",
+            "install story: sync win/ into %LOCALAPPDATA%\\peep\\app with automatic hash-checked resync from the shim, not UNC execution or pip -e",
+            "pipeline fallback on start-up failure is automatic but loud (terminal, log, sidecar attempts)",
+            "a kill-on-close Job Object so a dead recorder cannot orphan a recording ffmpeg",
+            "tests written as unittest classes so they run without pytest, which the WSL Ubuntu lacks",
+            "a failed start removes its sidecar instead of leaving clutter in the Videos folder"
+          ],
+          "budget_pressure": "none",
+          "includes_missing": [],
+          "compaction_occurred": {
+            "occurred": false,
+            "disclosure_ref": null
+          },
+          "docs_read": [
+            "manifest.json",
+            "AGENT.md META through 11.2",
+            "README.md (the brief)",
+            "start.md",
+            ".gitignore",
+            "TARBALL.md sections 1, 2, 4, 5, 6, 7, 8, 9, 10.1, 10.2",
+            "CODE.md sections 1, 2, 5, 9, 10, 11, 12, 13"
+          ]
+        }
+      },
+      "log": ".bale/logs/2026-10-05-engine-storage-core-002.log",
+      "clarification": {
+        "rounds": 0,
+        "records": []
+      },
+      "corrects": null,
+      "checkpoint": {
+        "configured": false
+      }
+    }
+  ],
+  "updated_at": "2026-10-05T01:34:25+00:00",
+  "outcome": "applied"
+}
