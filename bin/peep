@@ -1,0 +1,429 @@
+#!/usr/bin/env python3
+"""peep — the WSL-side shim for peep-peep.
+
+Thin on purpose: every command runs the Windows package through interop,
+
+    python.exe -X utf8 %LOCALAPPDATA%\\peep\\app\\peepw.py <command> [args]
+
+so process control, the flash window and file I/O all happen on the
+Windows side. What the shim does itself:
+
+  * install   copy win/ from this repo into %LOCALAPPDATA%\\peep\\app (the
+              Windows-local copy session B will launch at login) and link
+              ~/.local/bin/peep to this script
+  * autosync  before each command, re-copy if the repo's win/ files differ
+              from the installed copy (one stderr line when it happens)
+  * rec       keys: q, Q or Enter in this terminal stop the recording;
+              Ctrl-C does too (the Windows child runs in its own session so
+              the signal never reaches interop, which would kill it raw);
+              stop is sent as a line on the child's stdin, and if this shim
+              dies the child sees EOF and stops cleanly as well
+  * doctor    shim-side checks (python.exe, installed copy, PATH) before
+              the Windows-side doctor
+
+Commands: rec, stop, ls, open, rename, doctor, config, paths, install, help.
+Environment: PEEP_PYTHON (default python.exe), PEEP_NO_AUTOSYNC=1,
+PEEP_REC_NO_SETSID=1 (keep `rec`'s child in this terminal's session).
+
+Sections:
+  1. Locations + shim config    (~line 50)
+  2. Install / sync             (~line 146)
+  3. Running the Windows side   (~line 248)
+  4. rec key handling           (~line 266)
+  5. doctor (shim side)         (~line 360)
+  6. Entry point                (~line 393)
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import select
+import shutil
+import signal
+import subprocess
+import sys
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# 1. Locations + shim config
+# ---------------------------------------------------------------------------
+
+REPO = Path(os.path.realpath(__file__)).parent.parent
+WIN_SRC = REPO / "win"
+APP_MARKER = "INSTALLED.json"
+WIN_COMMANDS = ("rec", "stop", "ls", "open", "rename", "doctor", "config", "paths")
+USAGE = """\
+usage: peep <command> [args]
+
+  rec [slug] [--collection NAME] [--no-flash] [--no-mic] [--scale 1920x1200] [--encoder qsv|qsv-download|x264]
+                          record until q / Enter / Ctrl-C here, or `peep stop` from another shell
+  stop                    stop the running recording and wait for the file
+  ls [--collection NAME] [--all] [--json]
+  open [last|STEM] [--folder]
+  rename last NAME [--collection NAME]
+  doctor [--capture]      check everything; prints the exact winget fixes
+  config [--init]         show the effective config / write a template
+  paths                   where config, logs and recordings live
+  install                 copy the Windows package to %LOCALAPPDATA%\\peep\\app, link ~/.local/bin/peep
+"""
+
+
+class ShimError(RuntimeError):
+    pass
+
+
+def log(msg: str) -> None:
+    try:
+        print(f"peep: {msg}", file=sys.stderr, flush=True)
+    except OSError:
+        pass  # terminal gone (tab closed mid-recording); nothing left to tell
+
+
+def shim_config_path(env=os.environ) -> Path:
+    base = env.get("XDG_CONFIG_HOME") or os.path.join(env.get("HOME", str(Path.home())), ".config")
+    return Path(base) / "peep" / "shim.json"
+
+
+def python_exe(env=os.environ) -> str:
+    return env.get("PEEP_PYTHON", "python.exe")
+
+
+def win_to_wsl(win_path: str, run=subprocess.run) -> str:
+    """C:\\Users\\x -> /mnt/c/Users/x, via wslpath when present."""
+    try:
+        res = run(["wslpath", "-u", win_path], capture_output=True, text=True, timeout=10)
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    drive, _, rest = win_path.partition(":")
+    if len(drive) != 1:
+        raise ShimError(f"cannot translate {win_path!r} to a WSL path")
+    return f"/mnt/{drive.lower()}/" + rest.lstrip("\\/").replace("\\", "/")
+
+
+def discover_localappdata(py: str, run=subprocess.run) -> str:
+    """%LOCALAPPDATA% as Windows Python sees it (interop forwards no env)."""
+    try:
+        res = run([py, "-c", "import os; print(os.environ['LOCALAPPDATA'])"],
+                  capture_output=True, text=True, timeout=30)
+    except FileNotFoundError:
+        raise ShimError(f"{py} not found from WSL; install it on Windows with: "
+                        f"winget install Python.Python.3.12  (then `wsl --shutdown` and reopen the terminal)")
+    except subprocess.TimeoutExpired:
+        raise ShimError(f"{py} did not answer within 30s")
+    out = res.stdout.strip()
+    if res.returncode != 0 or not out or ":" not in out:
+        raise ShimError(f"{py} could not report LOCALAPPDATA (exit {res.returncode}): "
+                        f"{(res.stderr or res.stdout).strip()[:200]} — is it the Microsoft Store stub? "
+                        f"fix: winget install Python.Python.3.12")
+    return out
+
+
+def load_shim_config(env=os.environ, run=subprocess.run) -> dict:
+    """{python, app_win, app_wsl}; discovered once and cached in ~/.config/peep/shim.json."""
+    path = shim_config_path(env)
+    py = python_exe(env)
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if data.get("python") == py and data.get("app_win") and data.get("app_wsl"):
+                return data
+        except (OSError, json.JSONDecodeError) as exc:
+            log(f"ignoring unreadable {path}: {exc}")
+    lad = discover_localappdata(py, run)
+    app_win = lad.rstrip("\\") + "\\peep\\app"
+    data = {"python": py, "app_win": app_win, "app_wsl": win_to_wsl(app_win, run)}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    log(f"Windows app location: {app_win} (cached in {path})")
+    return data
+
+
+# ---------------------------------------------------------------------------
+# 2. Install / sync
+# ---------------------------------------------------------------------------
+
+
+def source_files(src: Path = WIN_SRC) -> dict[str, str]:
+    """relative posix path -> sha256 for every file the Windows side needs:
+    peepw.py and the peep package's .py files (caches excluded)."""
+    out = {}
+    candidates = [src / "peepw.py"] + sorted((src / "peep").rglob("*.py"))
+    for p in candidates:
+        if "__pycache__" in p.parts:
+            continue
+        out[p.relative_to(src).as_posix()] = hashlib.sha256(p.read_bytes()).hexdigest()
+    if "peepw.py" not in out or "peep/cli.py" not in out:
+        raise ShimError(f"{src} does not look like the peep Windows package")
+    return out
+
+
+def installed_files(app: Path) -> dict[str, str]:
+    try:
+        return json.loads((app / APP_MARKER).read_text(encoding="utf-8")).get("files", {})
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def needs_sync(app: Path, src: Path = WIN_SRC) -> bool:
+    want = source_files(src)
+    if installed_files(app) != want:
+        return True
+    return any(not (app / rel).exists() for rel in want)
+
+
+def sync(app: Path, src: Path = WIN_SRC) -> list[str]:
+    """Make `app` an exact copy of the package files; returns the paths copied.
+    Removes .py files under app/peep that no longer exist in the source;
+    never touches anything else in `app`."""
+    want = source_files(src)
+    have = installed_files(app)
+    copied = []
+    for rel, digest in want.items():
+        dst = app / rel
+        if have.get(rel) == digest and dst.exists():
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src / rel, dst)
+        copied.append(rel)
+    pkg = app / "peep"
+    if pkg.exists():
+        for p in pkg.rglob("*.py"):
+            rel = p.relative_to(app).as_posix()
+            if rel not in want:
+                p.unlink()
+                copied.append(f"(removed) {rel}")
+    marker = {"files": want, "source": str(src), "commit": git_commit(src)}
+    (app / APP_MARKER).write_text(json.dumps(marker, indent=2) + "\n", encoding="utf-8")
+    return copied
+
+
+def git_commit(src: Path) -> str | None:
+    try:
+        res = subprocess.run(["git", "-C", str(src), "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=5)
+        return res.stdout.strip() or None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def autosync(cfg: dict, env=os.environ) -> None:
+    if env.get("PEEP_NO_AUTOSYNC") == "1":
+        return
+    app = Path(cfg["app_wsl"])
+    if needs_sync(app):
+        changed = sync(app)
+        log(f"updated the Windows copy ({len(changed)} file(s)) in {cfg['app_win']}")
+
+
+def link_self(bin_dir: Path, force: bool = False) -> str:
+    target = Path(os.path.realpath(__file__))
+    link = bin_dir / "peep"
+    if link.is_symlink() or link.exists():
+        if link.resolve() == target:
+            return f"{link} already points here"
+        if not force:
+            return f"{link} exists and points elsewhere ({link.resolve()}); left alone (use install --force)"
+        link.unlink()
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target)
+    on_path = str(bin_dir) in os.environ.get("PATH", "").split(":")
+    return f"linked {link} -> {target}" + ("" if on_path else f" (add {bin_dir} to PATH)")
+
+
+def cmd_install(args: list[str], env=os.environ) -> int:
+    cfg = load_shim_config(env)
+    app = Path(cfg["app_wsl"])
+    copied = sync(app)
+    print(f"Windows package: {cfg['app_win']} ({len(copied)} file(s) copied)")
+    print(link_self(Path(env.get("HOME", str(Path.home()))) / ".local" / "bin", force="--force" in args))
+    print("next: peep doctor")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# 3. Running the Windows side
+# ---------------------------------------------------------------------------
+
+
+def windows_argv(cfg: dict, command: str, rest: list[str]) -> list[str]:
+    if command not in WIN_COMMANDS:
+        raise ShimError(f"unknown command {command!r}")
+    return [cfg["python"], "-X", "utf8", cfg["app_win"] + "\\peepw.py", command, *rest]
+
+
+def run_passthrough(argv: list[str], cwd: str | None) -> int:
+    try:
+        return subprocess.call(argv, cwd=cwd)
+    except FileNotFoundError:
+        raise ShimError(f"{argv[0]} not found; fix: winget install Python.Python.3.12")
+
+
+# ---------------------------------------------------------------------------
+# 4. rec key handling
+# ---------------------------------------------------------------------------
+
+STOP_KEYS = (b"q", b"Q", b"\n", b"\r")
+
+
+def is_stop_key(ch: bytes) -> bool:
+    return ch in STOP_KEYS
+
+
+class _Cbreak:
+    """Single-keypress input without echo, restored on exit; no-op off a tty."""
+
+    def __init__(self, fd: int):
+        self.fd, self.saved = fd, None
+
+    def __enter__(self):
+        if os.isatty(self.fd):
+            import termios
+            import tty
+            self.saved = termios.tcgetattr(self.fd)
+            tty.setcbreak(self.fd)
+        return self
+
+    def __exit__(self, *exc):
+        if self.saved is not None:
+            import termios
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, self.saved)
+
+
+def run_rec(argv: list[str], cwd: str | None, stdin_fd: int | None = None,
+            popen=subprocess.Popen) -> int:
+    """Run the Windows `rec`, translating q/Enter/Ctrl-C/EOF here into one
+    'stop' line on its stdin. Returns the Windows side's exit code."""
+    fd = sys.stdin.fileno() if stdin_fd is None else stdin_fd
+    try:
+        # Own session: the terminal's Ctrl-C must not reach the interop proxy, which would
+        # kill python.exe outright. PEEP_REC_NO_SETSID=1 opts out, for diagnosing interop.
+        new_session = os.environ.get("PEEP_REC_NO_SETSID") != "1"
+        proc = popen(argv, stdin=subprocess.PIPE, cwd=cwd, start_new_session=new_session)
+    except FileNotFoundError:
+        raise ShimError(f"{argv[0]} not found; fix: winget install Python.Python.3.12")
+    state = {"sent": False}
+
+    def send_stop(why: str) -> None:
+        if state["sent"]:
+            if why == "signal":
+                log("already stopping — finalizing the file, please wait")
+            return
+        state["sent"] = True
+        try:
+            proc.stdin.write(b"stop\n")
+            proc.stdin.flush()
+        except OSError:
+            pass  # the child already exited; its exit code tells the story
+
+    previous = {}
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        previous[sig] = signal.signal(sig, lambda *_: send_stop("signal"))
+    stdin_open = True
+    try:
+        with _Cbreak(fd):
+            while proc.poll() is None:
+                if not stdin_open:
+                    try:
+                        proc.wait(timeout=0.2)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    continue
+                try:
+                    ready, _, _ = select.select([fd], [], [], 0.2)
+                    ch = os.read(fd, 1) if ready else None
+                except InterruptedError:
+                    continue
+                except OSError:
+                    ch = b""   # EIO/EBADF: the terminal hung up — same as end of input
+                if ch is None:
+                    continue
+                if not ch:
+                    stdin_open = False
+                    send_stop("eof")
+                elif is_stop_key(ch):
+                    send_stop("key")
+        return proc.wait()
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# 5. doctor (shim side)
+# ---------------------------------------------------------------------------
+
+
+def shim_checks(env=os.environ, run=subprocess.run) -> tuple[list[str], dict | None]:
+    lines, cfg = [], None
+    py = python_exe(env)
+    try:
+        res = run([py, "--version"], capture_output=True, text=True, timeout=30)
+        ver = (res.stdout or res.stderr).strip()
+        ok = res.returncode == 0 and ver.startswith("Python 3.") and int(ver.split(".")[1]) >= 12
+        lines.append(f"[{'ok  ' if ok else 'FAIL'}] windows python: {ver or 'no output'} ({py})"
+                     + ("" if ok else "\n         fix: winget install Python.Python.3.12"))
+    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError) as exc:
+        lines.append(f"[FAIL] windows python: {py} unusable ({exc})\n         fix: winget install Python.Python.3.12")
+        return lines, None
+    try:
+        cfg = load_shim_config(env, run)
+        app = Path(cfg["app_wsl"])
+        stale = needs_sync(app)
+        lines.append(f"[{'warn' if stale else 'ok  '}] installed copy: {cfg['app_win']}"
+                     + (" (out of date; syncing now)" if stale else " (matches this repo)"))
+    except ShimError as exc:
+        lines.append(f"[FAIL] installed copy: {exc}")
+        cfg = None
+    bin_dir = os.path.join(env.get("HOME", ""), ".local", "bin")
+    on_path = bin_dir in env.get("PATH", "").split(":")
+    lines.append(f"[{'ok  ' if on_path else 'warn'}] shim on PATH: {bin_dir}"
+                 + ("" if on_path else " is not on PATH (run peep as ./bin/peep, or add it)"))
+    return lines, cfg
+
+
+# ---------------------------------------------------------------------------
+# 6. Entry point
+# ---------------------------------------------------------------------------
+
+
+def main(argv: list[str] | None = None, env=os.environ) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    if not args or args[0] in ("help", "-h", "--help"):
+        print(USAGE, end="")
+        return 0 if args else 2
+    command, rest = args[0], args[1:]
+    try:
+        if command == "install":
+            return cmd_install(rest, env)
+        if command not in WIN_COMMANDS:
+            log(f"unknown command {command!r}")
+            print(USAGE, end="", file=sys.stderr)
+            return 2
+        if command == "doctor":
+            lines, cfg = shim_checks(env)
+            print("WSL side:\n" + "\n".join(lines) + "\n\nWindows side:", flush=True)
+            if cfg is None:
+                return 1
+        else:
+            cfg = load_shim_config(env)
+        autosync(cfg, env)
+        win_argv = windows_argv(cfg, command, rest)
+        cwd = cfg["app_wsl"] if os.path.isdir(cfg["app_wsl"]) else None
+        if command == "rec":
+            return run_rec(win_argv, cwd)
+        return run_passthrough(win_argv, cwd)
+    except ShimError as exc:
+        log(f"error: {exc}")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

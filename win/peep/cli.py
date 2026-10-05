@@ -1,0 +1,318 @@
+"""Windows-side command line: what the WSL `peep` shim runs through
+interop (`python.exe ...\\peep\\app\\peepw.py <command>`), and what can be
+run directly from any Windows console.
+
+  rec [slug] [--collection C] [--no-flash] [--no-mic] [--scale WxH|native]
+             [--encoder qsv|qsv-download|x264] [--fps N] [--stdin-stop line|off]
+  stop [--no-wait] [--timeout S]
+  ls [--collection C] [--limit N] [--all] [--json]
+  open [REF] [--folder]            REF: last (default), a stem, or a uid prefix
+  rename REF NAME [--collection C]
+  doctor [--capture]
+  config [--init]                  show the effective config / write a template
+  paths                            where everything lives
+
+Exit codes: 0 success, 1 failure (message on stderr), 2 usage error.
+
+Sections:
+  1. Parser                     (~line 40)
+  2. Commands                   (~line 91)
+  3. Entry point                (~line 282)
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import subprocess
+import sys
+import threading
+from pathlib import Path
+
+from . import __version__, catalog, config as config_mod, naming, paths
+from .control import AlreadyRecording, Control
+from .logsetup import configured_log_path, event, setup_logging
+
+log = logging.getLogger("peep.cli")
+
+# ---------------------------------------------------------------------------
+# 1. Parser
+# ---------------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="peep", description="peep-peep screen recorder (Windows side)")
+    p.add_argument("--version", action="version", version=f"peep {__version__}")
+    sub = p.add_subparsers(dest="command", required=True, metavar="COMMAND")
+
+    r = sub.add_parser("rec", help="record the screen (+ mic) until q/Enter or `peep stop`")
+    r.add_argument("slug", nargs="?", help="name for the recording (default: from the foreground window)")
+    r.add_argument("--collection", "-c", help="collection folder (default: config default_collection)")
+    r.add_argument("--no-flash", action="store_true", help="skip the clapper flashes")
+    r.add_argument("--no-mic", action="store_true", help="record without the microphone")
+    r.add_argument("--scale", help="output size: native or WxH, e.g. 1920x1200")
+    r.add_argument("--encoder", choices=config_mod.PIPELINES, help="video pipeline for this recording")
+    r.add_argument("--fps", type=int, help="frame rate for this recording")
+    r.add_argument("--stdin-stop", choices=("line", "off"), default="line",
+                   help="line: any line on stdin, or stdin closing, stops the recording (default); "
+                        "off: ignore stdin (for detached launches)")
+
+    s = sub.add_parser("stop", help="stop the running recording")
+    s.add_argument("--no-wait", action="store_true", help="return as soon as the request is written")
+    s.add_argument("--timeout", type=float, default=60.0, help="seconds to wait for the file to finalize")
+
+    ls = sub.add_parser("ls", help="list recordings from the catalog")
+    ls.add_argument("--collection", "-c")
+    ls.add_argument("--limit", "-n", type=int, default=20)
+    ls.add_argument("--all", action="store_true", help="include failed captures")
+    ls.add_argument("--json", action="store_true")
+
+    o = sub.add_parser("open", help="open a recording with the Windows default player")
+    o.add_argument("ref", nargs="?", default="last")
+    o.add_argument("--folder", action="store_true", help="open its folder in Explorer instead")
+
+    rn = sub.add_parser("rename", help="rename a recording (keeps its date prefix)")
+    rn.add_argument("ref")
+    rn.add_argument("name")
+    rn.add_argument("--collection", "-c", help="also move it to this collection")
+
+    d = sub.add_parser("doctor", help="check ffmpeg, devices, encoders, storage; prints fixes")
+    d.add_argument("--capture", action="store_true", help="also run a 2 s capture into the null muxer")
+
+    c = sub.add_parser("config", help="show the effective configuration")
+    c.add_argument("--init", action="store_true", help="write a commented template if none exists")
+
+    sub.add_parser("paths", help="show where peep keeps things")
+    return p
+
+
+# ---------------------------------------------------------------------------
+# 2. Commands
+# ---------------------------------------------------------------------------
+
+
+def _out(msg: str = "") -> None:
+    """Print a status line. A vanished terminal (the WSL tab closed mid-recording)
+    must not abort the recording, so write failures are logged, never raised."""
+    try:
+        print(msg, flush=True)
+    except (OSError, ValueError) as exc:
+        event(log, logging.WARNING if not _out.failed else logging.DEBUG, "stdout.write_failed",
+              error=repr(exc), message=msg)
+        _out.failed = True
+
+
+_out.failed = False
+
+
+def _err(msg: str) -> None:
+    try:
+        print(f"peep: error: {msg}", file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        event(log, logging.ERROR, "stderr.write_failed", message=msg)
+
+
+def _control(env=None) -> Control:
+    from . import winapi
+    return Control(paths.state_dir(env), winapi.pid_alive)
+
+
+def watch_stdin(stop_event: threading.Event, stream=None) -> threading.Thread:
+    """Set `stop_event` on any line from stdin, or when stdin closes (the
+    shim exiting or its terminal closing must stop the recording, not
+    orphan it)."""
+    stream = stream if stream is not None else getattr(sys.stdin, "buffer", None)
+
+    def run():
+        try:
+            line = stream.readline()
+            event(log, logging.INFO, "stdin.stop", eof=not line)
+        except (OSError, ValueError) as exc:
+            event(log, logging.WARNING, "stdin.read_failed", error=repr(exc))
+        stop_event.set()
+
+    t = threading.Thread(target=run, name="stdin-stop", daemon=True)
+    t.start()
+    return t
+
+
+def cmd_rec(args, cfg) -> int:
+    from .recorder import RecordError, Recorder, RecordRequest
+    if args.scale is not None:
+        config_mod.parse_scale(args.scale)
+    stop_event = threading.Event()
+    if args.stdin_stop == "line" and sys.stdin is not None:
+        watch_stdin(stop_event)
+    req = RecordRequest(slug=args.slug, collection=args.collection,
+                        flash=False if args.no_flash else None, audio=False if args.no_mic else None,
+                        pipeline=args.encoder, scale=args.scale, fps=args.fps)
+    try:
+        result = Recorder(cfg, _control(), status=_out).record(req, stop_event)
+    except (RecordError, AlreadyRecording) as exc:
+        _err(str(exc))
+        return 1
+    if result.ok:
+        _out(f"✓ {result.message}")
+        return 0
+    _err(result.message)
+    for line in result.stderr_tail[-8:]:
+        print(f"    ffmpeg: {line}", file=sys.stderr)
+    return 1
+
+
+def cmd_stop(args, cfg) -> int:
+    ctl = _control()
+    try:
+        info = ctl.request_stop()
+    except LookupError as exc:
+        _err(str(exc))
+        return 1
+    _out(f"stop requested for {Path(info.get('final') or info.get('capture') or '?').name}")
+    if args.no_wait:
+        return 0
+    if not ctl.wait_finished(int(info["pid"]), args.timeout):
+        _err(f"recorder (pid {info['pid']}) has not finished after {args.timeout:g}s; check the log")
+        return 1
+    last = catalog.Catalog(cfg.root_path()).entries()
+    mine = [e for e in last if e.uid == info.get("uid")]
+    if mine:
+        e = mine[-1]
+        state = "saved" if e.status == "ok" else "FAILED, kept"
+        _out(f"{state} {e.media_path(cfg.root_path())}")
+        return 0 if e.status == "ok" else 1
+    _err("the recorder finished but did not catalog a recording; check the log")
+    return 1
+
+
+def format_duration(seconds) -> str:
+    if not isinstance(seconds, (int, float)):
+        return "?"
+    s = int(round(seconds))
+    return f"{s // 60}:{s % 60:02d}"
+
+
+def format_listing(entries: list[catalog.Entry]) -> str:
+    if not entries:
+        return "(no recordings yet)"
+    rows = [("created", "dur", "collection", "file")]
+    for e in entries:
+        mark = "" if e.status == "ok" else "  [failed]"
+        rows.append((e.created[:16].replace("T", " "), format_duration(e.duration_s), e.collection,
+                     e.file + mark))
+    widths = [max(len(r[i]) for r in rows) for i in range(3)]
+    return "\n".join(f"{r[0]:<{widths[0]}}  {r[1]:>{widths[1]}}  {r[2]:<{widths[2]}}  {r[3]}" for r in rows)
+
+
+def cmd_ls(args, cfg) -> int:
+    entries = catalog.Catalog(cfg.root_path()).entries()
+    if args.collection:
+        coll = naming.validate_collection(args.collection)
+        entries = [e for e in entries if e.collection == coll]
+    if not args.all:
+        entries = [e for e in entries if e.status == "ok"]
+    entries = entries[-args.limit:] if args.limit > 0 else entries
+    if args.json:
+        _out(json.dumps([e.__dict__ for e in entries], indent=2, ensure_ascii=False))
+    else:
+        _out(format_listing(entries))
+    return 0
+
+
+def cmd_open(args, cfg) -> int:
+    from . import winapi
+    entry = catalog.Catalog(cfg.root_path()).resolve(args.ref)
+    media = entry.media_path(cfg.root_path())
+    if not media.exists():
+        _err(f"file is missing: {media}")
+        return 1
+    if args.folder:
+        argv = ["explorer.exe", f"/select,{media}"]
+        event(log, logging.INFO, "open.folder", argv=argv)
+        subprocess.Popen(argv)
+    else:
+        event(log, logging.INFO, "open.file", path=str(media))
+        winapi.open_with_default(str(media))
+    _out(f"opened {media}")
+    return 0
+
+
+def cmd_rename(args, cfg) -> int:
+    entry = catalog.rename(cfg.root_path(), args.ref, args.name, args.collection)
+    _out(f"renamed → {entry.media_path(cfg.root_path())}")
+    return 0
+
+
+def cmd_doctor(args, cfg) -> int:
+    from .doctor import Doctor, render
+    text, code = render(Doctor(cfg).checks(capture_test=args.capture))
+    _out(text)
+    return code
+
+
+def cmd_config(args, cfg) -> int:
+    p = paths.config_path()
+    if args.init:
+        if p.exists():
+            _err(f"{p} already exists; edit it directly")
+            return 1
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(config_mod.TEMPLATE, encoding="utf-8")
+        _out(f"wrote {p}")
+        return 0
+    _out(f"# source: {cfg.source}  (file: {p})")
+    _out(json.dumps(cfg.to_dict(), indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_paths(args, cfg) -> int:
+    rows = [("data dir", paths.data_dir()), ("config", paths.config_path()),
+            ("log", configured_log_path() or paths.logs_dir() / "peep.log"),
+            ("state", paths.state_dir()), ("app (installed code)", paths.data_dir() / "app"),
+            ("recordings root", cfg.root_path()), ("catalog", cfg.root_path() / catalog.CATALOG_NAME)]
+    for k, v in rows:
+        _out(f"{k:<22} {v}")
+    return 0
+
+
+COMMANDS = {"rec": cmd_rec, "stop": cmd_stop, "ls": cmd_ls, "open": cmd_open, "rename": cmd_rename,
+            "doctor": cmd_doctor, "config": cmd_config, "paths": cmd_paths}
+
+# ---------------------------------------------------------------------------
+# 3. Entry point
+# ---------------------------------------------------------------------------
+
+
+def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+    args = build_parser().parse_args(argv)
+    try:
+        cfg = config_mod.load()
+    except config_mod.ConfigError as exc:
+        setup_logging(paths.logs_dir())
+        event(log, logging.ERROR, "config.invalid", error=str(exc))
+        _err(f"config: {exc}")
+        return 1
+    setup_logging(paths.logs_dir(), cfg.log_level)
+    event(log, logging.INFO, "cli.start", command=args.command, argv=sys.argv[1:] if argv is None else argv,
+          version=__version__, config=cfg.source)
+    try:
+        code = COMMANDS[args.command](args, cfg)
+    except (config_mod.ConfigError, naming.NamingError, LookupError, ValueError, OSError) as exc:
+        # OSError covers FileNotFoundError/FileExistsError and Windows sharing violations
+        # (a recording open in a player cannot be renamed: WinError 32).
+        event(log, logging.ERROR, "cli.error", command=args.command, error=str(exc))
+        _err(str(exc))
+        code = 1
+    except KeyboardInterrupt:
+        event(log, logging.WARNING, "cli.interrupted", command=args.command)
+        _err("interrupted")
+        code = 1
+    except Exception as exc:
+        log.exception("unexpected error in %s", args.command)
+        _err(f"unexpected {type(exc).__name__}: {exc} (traceback in {configured_log_path()})")
+        code = 1
+    event(log, logging.INFO, "cli.exit", command=args.command, exit_code=code)
+    return code
