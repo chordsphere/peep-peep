@@ -34,13 +34,18 @@ class FlashRecord:
     shown_mono: float             # time.monotonic() at the same instant
     hidden_mono: float            # time.monotonic() when it was withdrawn
     shown: bool                   # False for NullFlasher / failures
+    # Session A.1: the same instant on the QPC clock (time.perf_counter on Windows), the
+    # clock the audio children stamp samples with, so C can relate flash and audio
+    # exactly. time.monotonic is GetTickCount64 on Python 3.12 (15.6 ms steps).
+    shown_qpc: float | None = None
 
     def to_sidecar(self, t0_mono: float) -> dict:
         """Sidecar form; times relative to the ffmpeg launch (t0)."""
         return {"color": self.color, "duration_ms": self.duration_ms, "shown": self.shown,
                 "shown_at": self.shown_at,
                 "since_ffmpeg_start_s": round(self.shown_mono - t0_mono, 3),
-                "actual_ms": round((self.hidden_mono - self.shown_mono) * 1000, 1)}
+                "actual_ms": round((self.hidden_mono - self.shown_mono) * 1000, 1),
+                "shown_qpc": round(self.shown_qpc, 6) if self.shown_qpc is not None else None}
 
 
 def _iso_now() -> str:
@@ -55,7 +60,7 @@ class NullFlasher:
 
     def flash(self, color: str, duration_ms: int) -> FlashRecord:
         now = time.monotonic()
-        return FlashRecord(color, duration_ms, _iso_now(), now, now, shown=False)
+        return FlashRecord(color, duration_ms, _iso_now(), now, now, shown=False, shown_qpc=time.perf_counter())
 
     def close(self) -> None:
         pass
@@ -97,7 +102,7 @@ class TkFlasher:
         root.lift()
         root.attributes("-topmost", True)
         root.update()
-        shown_mono, shown_at = time.monotonic(), _iso_now()
+        shown_qpc, shown_mono, shown_at = time.perf_counter(), time.monotonic(), _iso_now()
         deadline = shown_mono + duration_ms / 1000
         while time.monotonic() < deadline:
             root.update()
@@ -107,7 +112,7 @@ class TkFlasher:
         hidden = time.monotonic()
         event(log, logging.INFO, "flash.shown", color=color, requested_ms=duration_ms,
               actual_ms=round((hidden - shown_mono) * 1000, 1))
-        return FlashRecord(color, duration_ms, shown_at, shown_mono, hidden, shown=True)
+        return FlashRecord(color, duration_ms, shown_at, shown_mono, hidden, shown=True, shown_qpc=shown_qpc)
 
     def close(self) -> None:
         if self.root is not None:

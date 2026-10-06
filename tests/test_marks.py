@@ -154,15 +154,20 @@ class RecorderMarksTest(RecorderHarness, unittest.TestCase):
         ev = threading.Event()
 
         def driver():
+            deadline = time.monotonic() + 20           # bounded: a recording that never starts fails, not hangs
             while not (self.control.read_active() or {}).get("status") == "recording":
+                if time.monotonic() > deadline:
+                    ev.set()
+                    return
                 time.sleep(0.01)
             self.control.request_mark("hotkey")
             ev.set()                                   # same instant: the final sweep must catch it
 
-        t = threading.Thread(target=driver)
+        t = threading.Thread(target=driver, daemon=True)
         t.start()
         res = rec.record(RecordRequest(), ev)
-        t.join()
+        t.join(25)
+        self.assertTrue(res.ok, res.message)
         self.assertEqual(len(catalog.read_sidecar(res.sidecar_path)["marks"]), 1)
 
     def test_marks_are_persisted_while_recording(self):

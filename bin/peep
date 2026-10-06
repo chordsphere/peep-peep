@@ -57,15 +57,20 @@ WIN_COMMANDS = ("rec", "stop", "mark", "ls", "open", "rename", "doctor", "config
 USAGE = """\
 usage: peep <command> [args]
 
-  rec [slug] [--collection NAME] [--no-flash] [--no-mic] [--scale 1920x1200] [--encoder qsv|qsv-download|x264]
+  rec [slug] [--collection NAME] [--no-flash] [--audio system|mic|both|none] [--no-mic]
+      [--scale 1920x1200] [--encoder qsv|qsv-download|x264]
                           record until q / Enter / Ctrl-C here, or `peep stop` from another shell
+                          (audio: computer audio by default; config audio.sources sets the default)
   stop                    stop the running recording and wait for the file
   mark [--label TEXT]     drop a mark (cyan flash + sidecar entry) in the running recording
   ls [--collection NAME] [--all] [--json]
   open [last|STEM] [--folder]
   rename last NAME [--collection NAME]
-  doctor [--capture]      check everything; prints the exact winget fixes
+  doctor [--capture]      check everything; prints the exact winget fixes (plays a short test tone)
   config [--init]         show the effective config / write a template
+  config get [KEY]        one key's value, or every key with where it comes from
+  config set KEY VALUE    e.g. `peep config set audio.sources both`; keeps the file's comments
+  config unset KEY        back to the built-in default
   paths                   where config, logs and recordings live
   install                 copy the Windows package to %LOCALAPPDATA%\\peep\\app, link ~/.local/bin/peep
 

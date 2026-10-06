@@ -1,6 +1,7 @@
 """`peep doctor` against the ffmpeg listings the session-A probe captured
 on the laptop (2026-10-05, ffmpeg 9.0.2 Gyan full build)."""
 
+import json
 import unittest
 
 from tests import TempDirMixin
@@ -49,7 +50,26 @@ def fake_run(table):
     return run
 
 
-LAPTOP = {"-version": (0, VERSION, ""), "-filters": (0, FILTERS, ""), "-devices": (0, DEVICES, ""),
+# `python -m peep.wasapi list` / `test` output, from the A.1 probe (2026-10-06)
+FX = {"id": "{0.0.0.00000000}.{a6935c5e-eeda-431a-a624-864c87bcb4bd}",
+      "name": "FxSound Speakers (FxSound Audio Enhancer)", "flow": "render", "state": "active", "is_default": True}
+SPK = {"id": "{0.0.0.00000000}.{63e24de0-203c-403d-8b61-82ed6b8a217c}", "name": "Speakers (Realtek XU)",
+       "flow": "render", "state": "active", "is_default": False}
+MICEP = {"id": "{0.0.1.00000000}.{85a9c569-9688-43b6-833e-478df7bbfddc}",
+         "name": "Microphone Array on SoundWire Device (6- Realtek XU)", "flow": "capture", "state": "active",
+         "is_default": True}
+F32 = {"rate": 48000, "channels": 2, "sample_bits": 32, "is_float": True, "valid_bits": 0, "channel_mask": 3,
+       "block_align": 8, "ffmpeg_format": "f32le"}
+WASAPI_LIST = json.dumps({"render": [FX, SPK, dict(SPK, name="Speakers (2- Realtek XU)", state="not present",
+                                                    id="x")],
+                          "capture": [MICEP], "default_render": FX, "default_capture": MICEP,
+                          "mix_formats": {FX["name"]: F32, SPK["name"]: F32, MICEP["name"]: F32}})
+WASAPI_TEST = json.dumps({"ok": True, "source": "system", "endpoint": FX, "format": F32, "peak": 0.5,
+                          "non_silent": True, "tone_latency_ms": 69.5, "packets_before_tone": 0})
+
+LAPTOP = {"SystemExit(main()) list": (0, WASAPI_LIST + "\n", ""),
+          "SystemExit(main()) test": (0, WASAPI_TEST + "\n", ""),
+          "-version": (0, VERSION, ""), "-filters": (0, FILTERS, ""), "-devices": (0, DEVICES, ""),
           "-encoders": (0, ENCODERS, ""), "-list_devices": (1, "", LIST_DEVICES),
           "ddagrab": (0, "", "frame=   60 fps= 30 time=00:00:02.00\n")}
 
@@ -83,7 +103,8 @@ class DoctorTest(TempDirMixin, unittest.TestCase):
         self.assertEqual(code, 0, text)
         names = self.by_name(checks)
         for n in ("python", "ffmpeg", "input ddagrab", "input dshow", "pipeline qsv", "fallback qsv-download",
-                  "fallback x264", "microphone", "storage root", "flash (tkinter)", "capture test (qsv + mic)"):
+                  "fallback x264", "audio sources", "system audio", "loopback capture", "storage root",
+                  "flash (tkinter)", "capture test (qsv, video only)"):
             self.assertTrue(names[n].ok, f"{n}: {names[n].detail}")
         self.assertIn("9.0.2", names["ffmpeg"].detail)
 
@@ -100,17 +121,21 @@ class DoctorTest(TempDirMixin, unittest.TestCase):
         self.assertIn(WINGET_PYTHON, text)
 
     def test_mic_missing_lists_what_exists(self):
-        cfg = c.from_mapping({"root": str(self.tmp), "audio": {"device": "Headset Mic"}})
-        mic = self.by_name(self.doctor(cfg=cfg).checks())["microphone"]
+        cfg = c.from_mapping({"root": str(self.tmp), "audio": {"device": "Headset Mic", "sources": "mic",
+                                                                "mic_backend": "dshow"}})
+        mic = self.by_name(self.doctor(cfg=cfg).checks())["microphone (dshow)"]
         self.assertFalse(mic.ok)
         self.assertIn("Microphone Array on SoundWire Device (6- Realtek XU)", mic.detail)
         self.assertIn(ALT, mic.detail)
 
     def test_mic_by_alternative_name_and_disabled(self):
-        cfg = c.from_mapping({"root": str(self.tmp), "audio": {"device": ALT}})
-        self.assertTrue(self.by_name(self.doctor(cfg=cfg).checks())["microphone"].ok)
+        cfg = c.from_mapping({"root": str(self.tmp), "audio": {"device": ALT, "sources": "mic",
+                                                                "mic_backend": "dshow"}})
+        self.assertTrue(self.by_name(self.doctor(cfg=cfg).checks())["microphone (dshow)"].ok)
         cfg = c.from_mapping({"root": str(self.tmp), "audio": {"enabled": False}})
-        self.assertTrue(self.by_name(self.doctor(cfg=cfg).checks())["microphone"].ok)
+        checks = self.by_name(self.doctor(cfg=cfg).checks())
+        self.assertIn("none", checks["audio sources"].detail)
+        self.assertNotIn("loopback capture", checks)
 
     def test_essentials_build_without_qsv(self):
         table = dict(LAPTOP)
@@ -137,3 +162,65 @@ class DoctorTest(TempDirMixin, unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AudioDoctorTest(TempDirMixin, unittest.TestCase):
+    """A.1's audio checks through the WASAPI child (stubbed runner)."""
+
+    def checks(self, audio=None, table=None):
+        cfg = c.from_mapping({"root": str(self.tmp / "Videos" / "peep"), "audio": audio or {}})
+        d = Doctor(cfg, run=fake_run(table or LAPTOP), which=lambda n: FF, environ={"PEEP_HOME": str(self.tmp)},
+                   tk_import=lambda: type("tk", (), {"TkVersion": 8.6}), python="python.exe")
+        return {ch.name: ch for ch in d.checks()}
+
+    def test_default_system_audio(self):
+        ch = self.checks()
+        self.assertIn("FxSound Speakers (FxSound Audio Enhancer)", ch["system audio"].detail)
+        self.assertIn("Windows default; 48000 Hz, 2 ch, f32le", ch["system audio"].detail)
+        self.assertTrue(ch["loopback capture"].ok)
+        self.assertIn("heard (peak 0.5, 69.5 ms", ch["loopback capture"].detail)
+        self.assertTrue((self.tmp / "clap.wav").exists())          # the test tone it played
+        self.assertNotIn("microphone", ch)
+        self.assertNotIn("audio offset", ch)
+
+    def test_the_child_is_bootstrapped_without_pythonpath(self):
+        d = Doctor(c.Config(), python="python.exe")
+        argv = d.wasapi_argv("list")
+        self.assertEqual(argv[:4], ["python.exe", "-X", "utf8", "-c"])
+        self.assertIn("from peep.wasapi import main", argv[4])
+        self.assertEqual(argv[-1], "list")
+
+    def test_configured_devices_resolve_or_list_the_choices(self):
+        ch = self.checks({"sources": "both", "system_device": "Realtek", "device": "Headset"})
+        self.assertTrue(ch["system audio"].ok)
+        self.assertIn("'Speakers (Realtek XU)' (configured", ch["system audio"].detail)
+        self.assertFalse(ch["microphone"].ok)
+        self.assertIn("Microphone Array on SoundWire Device (6- Realtek XU)", ch["microphone"].detail)
+        self.assertIn("peep config set audio.device", ch["microphone"].fix)
+
+    def test_silence_during_the_tone_is_a_warning(self):
+        table = dict(LAPTOP)
+        table["SystemExit(main()) test"] = (0, json.dumps({"ok": True, "endpoint": FX, "non_silent": False,
+                                                           "peak": 0.0, "tone_latency_ms": None}), "")
+        ch = self.checks(table=table)
+        self.assertFalse(ch["loopback capture"].ok)
+        self.assertTrue(ch["loopback capture"].warn_only)
+        self.assertIn("NOT heard", ch["loopback capture"].detail)
+
+    def test_a_crashed_child_is_named(self):
+        table = dict(LAPTOP)
+        table["SystemExit(main()) list"] = (3221225477, "", "")
+        ch = self.checks(table=table)
+        self.assertFalse(ch["audio devices"].ok)
+        self.assertIn("access violation", ch["audio devices"].detail)
+
+    def test_leftover_offset_is_flagged_with_the_fix(self):
+        ch = self.checks({"offset_ms": 500})
+        self.assertFalse(ch["audio offset"].ok)
+        self.assertTrue(ch["audio offset"].warn_only)
+        self.assertEqual(ch["audio offset"].fix.split("   ")[0], "peep config unset audio.offset_ms")
+
+    def test_dshow_backend_uses_the_dshow_listing(self):
+        ch = self.checks({"sources": "mic", "mic_backend": "dshow"})
+        self.assertTrue(ch["microphone (dshow)"].ok)
+        self.assertNotIn("loopback capture", ch)

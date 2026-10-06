@@ -72,7 +72,8 @@ def new_sidecar(*, uid: str, slug: str, collection: str, file: str, created: str
         "foreground": {"title": None, "process": None, "image": None},
         "video": {"pipeline": None, "encoder": None, "fps": None, "output_idx": None,
                   "capture_size": None, "output_size": None, "container": None},
-        "audio": None,              # {"device", "codec", "bitrate", "offset_ms"} or None when off
+        "audio": None,              # {"device", "codec", "bitrate", "offset_ms"} or None when off; A.1 adds
+                                    # sources, mix, tracks, epoch, system, mic, clap (recorder._audio_block)
         "flash": {"enabled": False, "start": None, "stop": None},
         "timeline": {},             # agent-side ISO stamps + seconds since ffmpeg launch
         "ffmpeg": {"argv": None, "exit_code": None, "stderr_tail": None, "remux_argv": None},

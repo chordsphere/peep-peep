@@ -2,8 +2,8 @@
 interop (`python.exe ...\\peep\\app\\peepw.py <command>`), and what can be
 run directly from any Windows console.
 
-  rec [slug] [--collection C] [--no-flash] [--no-mic] [--scale WxH|native]
-             [--encoder qsv|qsv-download|x264] [--fps N] [--stdin-stop line|off]
+  rec [slug] [--collection C] [--no-flash] [--audio system|mic|both|none] [--no-mic]
+             [--scale WxH|native] [--encoder qsv|qsv-download|x264] [--fps N] [--stdin-stop line|off]
   stop [--no-wait] [--timeout S]
   mark [--label TEXT]              drop a mark in the running recording (session B)
   agent VERB                       the resident hotkey agent; see agentcli.py (session B)
@@ -11,15 +11,17 @@ run directly from any Windows console.
   open [REF] [--folder]            REF: last (default), a stem, or a uid prefix
   rename REF NAME [--collection C]
   doctor [--capture]
-  config [--init]                  show the effective config / write a template
+  config [show|init|path]          show the effective config / write a template / where it is
+  config get [KEY] | set KEY VALUE | unset KEY
+                                   read or change one key; comments in config.toml are kept (A.1)
   paths                            where everything lives
 
 Exit codes: 0 success, 1 failure (message on stderr), 2 usage error.
 
 Sections:
-  1. Parser                     (~line 42)
-  2. Commands                   (~line 100)
-  3. Entry point                (~line 305)
+  1. Parser                     (~line 43)
+  2. Commands                   (~line 106)
+  3. Entry point                (~line 341)
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ import sys
 import threading
 from pathlib import Path
 
-from . import __version__, agentcli, catalog, config as config_mod, naming, paths
+from . import __version__, agentcli, catalog, config as config_mod, configedit, naming, paths
 from .control import AlreadyRecording, Control
 from .logsetup import configured_log_path, event, setup_logging
 
@@ -48,11 +50,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"peep {__version__}")
     sub = p.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
-    r = sub.add_parser("rec", help="record the screen (+ mic) until q/Enter or `peep stop`")
+    r = sub.add_parser("rec", help="record the screen (+ computer audio) until q/Enter or `peep stop`")
     r.add_argument("slug", nargs="?", help="name for the recording (default: from the foreground window)")
     r.add_argument("--collection", "-c", help="collection folder (default: config default_collection)")
     r.add_argument("--no-flash", action="store_true", help="skip the clapper flashes")
-    r.add_argument("--no-mic", action="store_true", help="record without the microphone")
+    r.add_argument("--audio", choices=config_mod.AUDIO_SOURCES,
+                   help="audio for this recording: system (computer audio), mic, both or none "
+                        "(default: config audio.sources)")
+    r.add_argument("--no-mic", action="store_true",
+                   help="leave the microphone out (both -> system, mic -> none; no effect on system)")
     r.add_argument("--scale", help="output size: native or WxH, e.g. 1920x1200")
     r.add_argument("--encoder", choices=config_mod.PIPELINES, help="video pipeline for this recording")
     r.add_argument("--fps", type=int, help="frame rate for this recording")
@@ -85,8 +91,12 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("doctor", help="check ffmpeg, devices, encoders, storage; prints fixes")
     d.add_argument("--capture", action="store_true", help="also run a 2 s capture into the null muxer")
 
-    c = sub.add_parser("config", help="show the effective configuration")
-    c.add_argument("--init", action="store_true", help="write a commented template if none exists")
+    c = sub.add_parser("config", help="show or change the configuration (comments in the file are kept)")
+    c.add_argument("action", nargs="?", default="show", choices=("show", "init", "path", "get", "set", "unset"),
+                   help="show (default) | init | path | get [KEY] | set KEY VALUE | unset KEY")
+    c.add_argument("key", nargs="?", help="dotted key, e.g. audio.offset_ms")
+    c.add_argument("value", nargs="?", help="new value for set (typed by the key: 500, true, 1.5, text, a,b)")
+    c.add_argument("--init", action="store_true", help="same as `config init`")
 
     sub.add_parser("paths", help="show where peep keeps things")
     agentcli.add_parser(sub)
@@ -150,8 +160,9 @@ def cmd_rec(args, cfg) -> int:
     stop_event = threading.Event()
     if args.stdin_stop == "line" and sys.stdin is not None:
         watch_stdin(stop_event)
+    sources = config_mod.effective_sources(cfg.audio, args.audio, args.no_mic)
     req = RecordRequest(slug=args.slug, collection=args.collection,
-                        flash=False if args.no_flash else None, audio=False if args.no_mic else None,
+                        flash=False if args.no_flash else None, audio_sources=sources,
                         pipeline=args.encoder, scale=args.scale, fps=args.fps)
     try:
         result = Recorder(cfg, _control(), status=_out).record(req, stop_event)
@@ -268,7 +279,38 @@ def cmd_doctor(args, cfg) -> int:
 
 def cmd_config(args, cfg) -> int:
     p = paths.config_path()
-    if args.init:
+    action = "init" if args.init else args.action
+    if action in ("set", "unset") and not args.key:
+        _err(f"config {action} needs a KEY (e.g. audio.offset_ms); `peep config get` lists them")
+        return 2
+    if action == "set" and args.value is None:
+        _err(f"config set {args.key} needs a VALUE")
+        return 2
+    if action == "path":
+        _out(str(p))
+        return 0
+    if action == "get":
+        rows = configedit.get_rows(cfg, p, args.key)
+        if args.key:
+            _out(rows[0][1])
+            return 0
+        width = max(len(k) for k, _, _ in rows)
+        for k, v, src in rows:
+            _out(f"{k:<{width}} = {v}" + ("" if src == "default" else "   # set in config.toml"))
+        return 0
+    if action in ("set", "unset"):
+        res = (configedit.set_value(p, args.key, args.value) if action == "set"
+               else configedit.unset_value(p, args.key))
+        event(log, logging.INFO, f"config.{action}", key=res.key, how=res.how, old=res.old, new=res.new, path=str(p))
+        old, new = configedit.toml_literal(res.old), configedit.toml_literal(res.new)
+        notes = {"replaced": "", "uncommented": " (uncommented the template line)", "added": " (added)",
+                 "added-section": " (added, with its section)", "restored-comment": " (back to the commented default)",
+                 "removed": " (line removed; default applies)", "not-set": " (was not set; default applies)"}
+        _out(f"{res.key}: {old} -> {new}{notes[res.how]}" + (f"  [created {p}]" if res.created_file else ""))
+        if res.how != "not-set":
+            _out("  the running agent picks this up within ~2 s; `peep rec` uses it from the next recording")
+        return 0
+    if action == "init":
         if p.exists():
             _err(f"{p} already exists; edit it directly")
             return 1
@@ -312,7 +354,11 @@ def main(argv: list[str] | None = None) -> int:
         setup_logging(paths.logs_dir(), file_name=agentcli.log_file_for(args))
         event(log, logging.ERROR, "config.invalid", error=str(exc))
         _err(f"config: {exc}")
-        return 1
+        if not (args.command == "config" and (args.init or args.action in ("set", "unset", "path"))):
+            return 1
+        # `peep config set/unset` is how a broken file gets fixed; they validate their own result
+        _err("continuing so `config` can repair the file (built-in defaults shown meanwhile)")
+        cfg = config_mod.Config()
     setup_logging(paths.logs_dir(), cfg.log_level, file_name=agentcli.log_file_for(args))
     event(log, logging.INFO, "cli.start", command=args.command, argv=sys.argv[1:] if argv is None else argv,
           version=__version__, config=cfg.source)

@@ -55,3 +55,30 @@ class TempDirMixin:
     def tearDown(self):
         self._td.cleanup()
         super().tearDown()
+
+
+_LOOPBACK = None
+
+
+def loopback_tcp_available() -> bool:
+    """Whether a TCP connect to 127.0.0.1 works here. It does not inside bale's
+    validation sandbox (a network-off namespace: bind works, connect fails with
+    ENETUNREACH), so the few tests that exercise real loopback TCP skip there,
+    saying why; everything else uses abstract AF_UNIX sockets (session A.1)."""
+    global _LOOPBACK
+    if _LOOPBACK is None:
+        import socket
+        try:
+            srv = socket.socket()
+            srv.bind(("127.0.0.1", 0))
+            srv.listen(1)
+            c = socket.create_connection(("127.0.0.1", srv.getsockname()[1]), timeout=1)
+            c.close()
+            srv.close()
+            _LOOPBACK = True
+        except OSError:
+            _LOOPBACK = False
+    return _LOOPBACK
+
+
+LOOPBACK_SKIP = "loopback TCP is unavailable here (bale's network-off validation sandbox); the AF_UNIX tests cover the same code"
