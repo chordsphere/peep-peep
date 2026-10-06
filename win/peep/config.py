@@ -7,9 +7,9 @@ config key that silently falls back to a default is exactly the silent
 skip AGENT.md calls a bug.
 
 Sections:
-  1. Defaults + dataclasses     (~line 27)
-  2. Loading + validation       (~line 160)
-  3. Template                   (~line 290)
+  1. Defaults + dataclasses     (~line 25)
+  2. Loading + validation       (~line 163)
+  3. Template                   (~line 330)
 """
 
 from __future__ import annotations
@@ -34,6 +34,9 @@ from . import paths
 DEFAULT_MIC = "Microphone Array on SoundWire Device (6- Realtek XU)"
 
 PIPELINES = ("qsv", "qsv-download", "x264")
+AUDIO_SOURCES = ("system", "mic", "both", "none")     # system = what the computer plays (WASAPI loopback)
+MIC_BACKENDS = ("wasapi", "dshow")
+AUDIO_MIXES = ("mix", "separate")
 CONTAINERS = ("mp4", "mkv")
 _HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
 _SCALE = re.compile(r"^(\d{2,5})x(\d{2,5})$")
@@ -66,11 +69,23 @@ class VideoConfig:
 
 @dataclass(frozen=True)
 class AudioConfig:
-    enabled: bool = True
-    device: str = DEFAULT_MIC
+    """Session A.1. Both sources are captured by our own WASAPI child processes
+    (wasapi.py) and start at the same instant as the video by construction;
+    see the README's audio section for the measurements behind the defaults."""
+    sources: str = "system"              # system (computer audio) | mic | both | none; `peep rec --audio` overrides
+    enabled: bool = True                 # false = no audio at all, whatever `sources` says (A's switch, kept)
+    system_device: str = ""              # output device to capture: "" = the Windows default output (see `peep doctor`)
+    device: str = ""                     # microphone: "" = the Windows default recording device, or a name from `peep doctor`
+    mic_backend: str = "wasapi"          # wasapi (aligned) | dshow (A's path: starts ~300 ms early and drifts; fallback only)
+    mix: str = "mix"                     # with both: one mixed track | separate: two tracks, system first
+    system_gain: float = 1.0
+    mic_gain: float = 1.0
     bitrate: str = "160k"
-    buffer_ms: int = 50                  # dshow audio_buffer_size; its default (500 ms) adds latency
-    offset_ms: int = 0                   # -itsoffset on the mic input; tune after the sync smoke test
+    offset_ms: int = 0                   # manual trim for every source: positive delays the audio
+    clap: bool = True                    # a short tone with the start flash when system audio is recorded
+    epoch_lead_ms: int = 58              # measured: ddagrab's first frame comes this long before ffmpeg prints "Input #0"
+    dshow_align_ms: int = 300            # dshow backend only: delay applied to its measured start lead
+    buffer_ms: int = 50                  # dshow backend only: audio_buffer_size (dshow's default 500 ms adds latency)
 
 
 @dataclass(frozen=True)
@@ -228,8 +243,7 @@ def validate(cfg: Config) -> None:
                           f"got {', '.join(colors)}")
     if not 20 <= f.duration_ms <= 2000:
         raise ConfigError(f"flash.duration_ms must be 20..2000, got {f.duration_ms}")
-    if a.enabled and not a.device.strip():
-        raise ConfigError("audio.device is empty; set it (see `peep doctor`) or set audio.enabled = false")
+    validate_audio(a)
     if cfg.output.container not in CONTAINERS:
         raise ConfigError(f"output.container must be one of {CONTAINERS}, got {cfg.output.container!r}")
     if _WSL_UNC.match(cfg.root):
@@ -237,6 +251,48 @@ def validate(cfg: Config) -> None:
     if cfg.log_level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR"):
         raise ConfigError(f"log_level must be DEBUG/INFO/WARNING/ERROR, got {cfg.log_level!r}")
     validate_agent(cfg.agent)
+
+
+def validate_audio(a: AudioConfig) -> None:
+    for name in ("device", "system_device"):
+        value = getattr(a, name)
+        if value and not value.strip():
+            raise ConfigError(f"audio.{name} is empty (only spaces); unset it for the Windows default, "
+                              f"or name a device from `peep doctor`")
+    if a.sources not in AUDIO_SOURCES:
+        raise ConfigError(f"audio.sources must be one of {AUDIO_SOURCES}, got {a.sources!r}")
+    if a.mic_backend not in MIC_BACKENDS:
+        raise ConfigError(f"audio.mic_backend must be one of {MIC_BACKENDS}, got {a.mic_backend!r}")
+    if a.mix not in AUDIO_MIXES:
+        raise ConfigError(f"audio.mix must be one of {AUDIO_MIXES}, got {a.mix!r}")
+    for name in ("system_gain", "mic_gain"):
+        if not 0.0 <= getattr(a, name) <= 8.0:
+            raise ConfigError(f"audio.{name} must be 0.0..8.0, got {getattr(a, name)}")
+    if not -5000 <= a.offset_ms <= 5000:
+        raise ConfigError(f"audio.offset_ms must be -5000..5000, got {a.offset_ms}")
+    if not 0 <= a.epoch_lead_ms <= 1000:
+        raise ConfigError(f"audio.epoch_lead_ms must be 0..1000, got {a.epoch_lead_ms}")
+    if not -2000 <= a.dshow_align_ms <= 3000:
+        raise ConfigError(f"audio.dshow_align_ms must be -2000..3000, got {a.dshow_align_ms}")
+    if not 10 <= a.buffer_ms <= 1000:
+        raise ConfigError(f"audio.buffer_ms must be 10..1000, got {a.buffer_ms}")
+
+
+def effective_sources(a: AudioConfig, override: str | None = None, no_mic: bool = False) -> str:
+    """The sources a recording uses: the override (`peep rec --audio`) or
+    `audio.sources`, `none` when audio.enabled is false (unless overridden),
+    and `--no-mic` taking the microphone out of whatever remains."""
+    if override is not None and override not in AUDIO_SOURCES:
+        raise ConfigError(f"--audio must be one of {AUDIO_SOURCES}, got {override!r}")
+    src = override if override is not None else (a.sources if a.enabled else "none")
+    if no_mic:
+        src = {"both": "system", "mic": "none"}.get(src, src)
+    return src
+
+
+def source_set(sources: str) -> tuple[str, ...]:
+    """'both' -> ('system', 'mic'); 'none' -> (); others -> (themselves,). System first, always."""
+    return {"both": ("system", "mic"), "none": ()}.get(sources, (sources,))
 
 
 def validate_agent(ag: AgentConfig) -> None:
@@ -296,12 +352,21 @@ TEMPLATE = '''\
 # x264_crf = 20
 # gop_seconds = 2
 
-[audio]
-# enabled = true
-# device = "Microphone Array on SoundWire Device (6- Realtek XU)"
+[audio]                           # `peep config set audio.KEY VALUE` edits this file and keeps these comments
+# sources = "system"              # system (computer audio) | mic | both | none; `peep rec --audio` overrides once
+# enabled = true                  # false: no audio at all
+# system_device = ""              # "" = the Windows default output; or a name from `peep doctor`
+# device = ""                     # microphone: "" = the Windows default recording device; or a name from `peep doctor`
+# mic_backend = "wasapi"          # wasapi (aligned to the video) | dshow (old path: starts ~300 ms early, drifts)
+# mix = "mix"                     # with both: one mixed track | "separate": two tracks, system first
+# system_gain = 1.0
+# mic_gain = 1.0
 # bitrate = "160k"
-# buffer_ms = 50
-# offset_ms = 0                   # positive delays the mic track; set from the sync smoke test
+# offset_ms = 0                   # manual trim for every source: positive delays the audio (default needs none)
+# clap = true                     # short tone with the start flash when system audio is recorded (sync marker)
+# epoch_lead_ms = 58              # measured 2026-10-06; only change it after re-measuring
+# dshow_align_ms = 300            # dshow backend only
+# buffer_ms = 50                  # dshow backend only
 
 [flash]
 # enabled = true

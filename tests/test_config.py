@@ -16,7 +16,10 @@ class DefaultsTest(unittest.TestCase):
         self.assertEqual(cfg.video.fps, 30)
         self.assertEqual(cfg.video.pipeline, "qsv")
         self.assertEqual(cfg.video.fallback, ("qsv-download", "x264"))
-        self.assertEqual(cfg.audio.device, "Microphone Array on SoundWire Device (6- Realtek XU)")
+        self.assertEqual(cfg.audio.device, "")                  # A.1: the Windows default recording device
+        self.assertEqual(cfg.audio.sources, "system")           # A.1: computer audio by default (decision 5)
+        self.assertEqual(cfg.audio.mic_backend, "wasapi")
+        self.assertEqual(cfg.audio.epoch_lead_ms, 58)           # probe-measured, see the README
         self.assertEqual(cfg.flash.start_color, "#FF00FF")
         self.assertEqual(cfg.flash.stop_color, "#00FF00")
         self.assertEqual(cfg.flash.duration_ms, 200)       # raised from 150 after the 2026-10-04 smoke test

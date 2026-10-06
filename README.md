@@ -32,6 +32,10 @@ agent: launched at login, global hotkeys, a REC pill hidden from capture,
 marks, and a stop dialog that prefills the name. **Session C** is post-processing:
 finding the clapper flashes, trimming to them, mark-based cuts, GIF/WebM
 presets and per-collection crop. B and C import A's modules unchanged.
+**Session A.1** (landed between B and C) is the audio pipeline: computer
+audio by default, captured by our own WASAPI code, a microphone option that
+no longer leads the picture, and `peep config set` so the config never needs
+a text editor. See [Audio](#audio).
 
 ## Install
 
@@ -71,7 +75,7 @@ points at `pythonw.exe %LOCALAPPDATA%\peep\app\peepw.py`.
 
 | Command | What it does |
 |---|---|
-| `peep rec [slug] [-c NAME]` | Record the screen and microphone. Stop with **q**, **Enter** or **Ctrl-C** in that terminal, or `peep stop` from another. With no slug the name comes from the foreground window (from a terminal at `~/peep-peep` that is `terminal-peep-peep`). Options: `--no-flash`, `--no-mic`, `--scale 1920x1200`, `--encoder qsv\|qsv-download\|x264`, `--fps N`. |
+| `peep rec [slug] [-c NAME]` | Record the screen and the computer's audio. Stop with **q**, **Enter** or **Ctrl-C** in that terminal, or `peep stop` from another. With no slug the name comes from the foreground window (from a terminal at `~/peep-peep` that is `terminal-peep-peep`). Options: `--audio system\|mic\|both\|none` (this recording only; the default is `audio.sources`), `--no-mic` (takes the mic out: both → system, mic → none), `--no-flash`, `--scale 1920x1200`, `--encoder qsv\|qsv-download\|x264`, `--fps N`. |
 | `peep stop` | Ask the running recording to stop and wait until its file is finalized; prints the path. `--no-wait` returns immediately. |
 | `peep mark [--label TEXT]` | Drop a mark in the running recording (cyan flash + an entry in the sidecar's `marks`). Same as **Ctrl+Alt+M**. |
 | `peep agent install\|uninstall` | Add (and start) or remove the hotkey agent's Startup-folder entry. |
@@ -79,8 +83,11 @@ points at `pythonw.exe %LOCALAPPDATA%\peep\app\peepw.py`.
 | `peep ls [-c NAME] [--all] [--json]` | List recordings from the catalog (newest last). `--all` includes failed captures. |
 | `peep open [last\|STEM] [--folder]` | Open with the Windows default player, or show it in Explorer. |
 | `peep rename last NAME [-c NAME]` | Rename (the date prefix stays), optionally moving it to another collection. The sidecar moves with it. |
-| `peep doctor [--capture]` | Check Python, ffmpeg, ddagrab/dshow, encoders, the mic, the storage root and tkinter. It never installs anything. |
+| `peep doctor [--capture]` | Check Python, ffmpeg, ddagrab/dshow, encoders, the audio devices (with a 1.5 s loopback capture while a short test tone plays), the storage root and tkinter. It never installs anything. |
 | `peep config [--init]` | Show the effective config, or write a commented template. |
+| `peep config get [KEY]` | One key's value (`peep config get audio.sources` → `"system"`), or every key with whether it comes from the file or the default. |
+| `peep config set KEY VALUE` | Change one key, e.g. `peep config set audio.sources both`. The file's comments stay; a commented-out template line is uncommented in place; the value is checked by the same loader the recorder uses, and a bad one leaves the file untouched. The agent picks the change up within ~2 s. |
+| `peep config unset KEY` | Back to the built-in default (the template's commented line comes back). |
 | `peep paths` | Where config, logs, state and recordings live. |
 
 Every command except `install` runs on the Windows side, and the same
@@ -166,6 +173,7 @@ C:\Users\chord\Videos\peep\            storage root (config: root)
   state\mark-*.json                    one per mark request, consumed by the recorder
   state\agent.json, agent-command      the agent's pid/status, and `peep agent stop|reload`
   agent-prefs.json                     the agent's last-used collection
+  clap.wav                             the 120 ms start tone (written on first use; also doctor's test tone)
   app\                                 the installed Windows package
 ```
 
@@ -177,7 +185,15 @@ creation time, duration, the foreground window and process at start, the
 video pipeline, encoder, capture and output size, the audio device, the
 flash colours with their agent-side timestamps (wall clock and seconds
 since ffmpeg launched), stop reason, ffmpeg's argv and exit code, and
-`trim: null`. `crop` is reserved for session C. `marks` is filled by
+`trim: null`. Since A.1 the `audio` block also holds `sources`, `mix`,
+`tracks` (what each audio track contains), `epoch` (the QPC stamps the
+alignment was built from: ffmpeg's launch, its `Input #0` line, the anchor),
+one block per source (`system`, `mic`: device, format, each connection's
+`first_sample_qpc`, the capture statistics, exit code, any error) and `clap`.
+Every flash gains `shown_qpc` on the same clock, so session C can relate a
+flash and a sound exactly. A's four `audio` keys keep their meaning
+(`device` is the microphone, `null` without one), so `peep.sidecar/1` is
+unchanged for existing readers. `crop` is reserved for session C. `marks` is filled by
 session B: each mark has `t` (seconds since the ffmpeg launch, at the
 keypress), its `label`, `source` (hotkey / cli) and its cyan flash's own
 stamp, on the same clock as the start and stop flashes.
@@ -190,12 +206,17 @@ Each recording has a `uid` that survives renames.
 1. The name is taken from the foreground window (or your slug) and a
    collision-free stem is picked. The sidecar is written straight away, which
    reserves the stem.
-2. ffmpeg starts into `<stem>.recording.mkv`. If the pipeline fails during
-   start-up, the next one in `video.fallback` is tried, and you are told.
+2. One capture child per audio source starts (see [Audio](#audio)), then
+   ffmpeg starts into `<stem>.recording.mkv`. If the pipeline fails during
+   start-up, the next one in `video.fallback` is tried, and you are told; the
+   audio children carry over to the next attempt.
 3. Once ffmpeg reports its output open, a 200 ms magenta full-screen flash
-   is shown. It is captured on purpose, as a fiducial for session C.
+   is shown, with a 120 ms 1 kHz tone when system audio is recorded
+   (`audio.clap`). It is captured on purpose, as a fiducial for session C.
    Marks during the recording show a 200 ms cyan flash.
 4. On stop: a 200 ms green flash, a short settle, then `q` on ffmpeg's stdin.
+   The audio children keep feeding ffmpeg until it has exited, and only then
+   are they stopped.
 5. The Matroska capture is remuxed to MP4 (streams copied, index at the
    front). The capture container is Matroska because a capture cut short by
    a crash is still playable. If ffmpeg dies mid-recording, the partial
@@ -221,12 +242,94 @@ child sees end-of-file and stops cleanly too. If the Windows process itself
 dies, a kill-on-close Job Object takes ffmpeg down with it rather than
 leaving it recording forever.
 
+## Audio
+
+```
+peep config set audio.sources system   # default: what the computer plays (videos, apps, notification sounds)
+peep config set audio.sources both     # computer audio + your voice, mixed into one track
+peep config set audio.sources mic      # your voice only
+peep rec --audio none                  # this recording only, silent
+```
+
+**How it works.** ffmpeg on this laptop has no WASAPI input and there is no
+Stereo Mix, so peep captures audio itself, with no third-party tool:
+`win/peep/wasapi.py` talks to WASAPI through `ctypes` COM (standard library
+only). Each source runs as a small child process, `python -m peep.wasapi
+serve --source system|mic`:
+
+- **system** is a *loopback* capture of the default output device (on this
+  laptop `FxSound Speakers`, because FxSound is running). Loopback delivers
+  nothing while nothing plays, so the child fills the gaps with silence
+  against the QPC clock: the track is always as long as the video.
+- **mic** is a plain capture of the default recording device (the
+  microphone array), through the same code.
+
+ffmpeg's stdin is reserved for `q`, so each child serves raw PCM on a
+localhost TCP port that ffmpeg reads with `-rw_timeout 3000000`. If a child
+ever hangs with its socket open, ffmpeg gives up on that read within 3 s and
+the stop still completes. A child that cannot start is reported on the
+status line, in the log and in the sidecar, and the recording goes on
+without that source. If one crashes (say, a COM error), only the child
+dies: the recorder and the resident agent survive and report its exit code.
+
+**Alignment.** ffmpeg puts its first screen frame at video t=0 and the
+first audio byte it reads at audio t=0. Each child keeps the last 15 s of
+audio, and when ffmpeg connects it starts the stream at the sample captured
+at the instant of the first screen frame. That instant is taken from ffmpeg
+itself: the first frame comes 58 ms before ffmpeg prints `Input #0` (measured over
+ten runs: 45–68 ms, σ 7 ms; timing from the ffmpeg launch instead varied
+twice as much). The recorder stamps that line and sends the instant to the
+children. The two t=0s are then the same moment by construction, for both
+sources.
+
+**What was measured** (A.1 probes, 2026-10-06, a flash and a 1 kHz beep
+recorded together, the screen read frame by frame):
+
+| | audio vs picture (+ = audio early) |
+|---|---|
+| system audio, aligned as above (4 runs) | −15.9, −3.3, −14.6, +7.0 ms: within half a frame |
+| microphone through WASAPI (same anchor) | the same numbers: both sources share the instant |
+| microphone through A's dshow path | +240 → +431, +248 → +349, +345 ms (and one +974): starts ~300 ms early **and grows during the recording** |
+| speaker → microphone, acoustically (FxSound + room) | 102–126 ms |
+
+That last dshow row is "the first bug". The dshow mic track starts
+300-ish ms ahead of the picture and keeps losing ground: the mic tracks of
+the A-era `sync` recordings are 0.41–0.64 s shorter than their video. No
+constant offset can fix that, which is why the microphone now goes through
+WASAPI. And the `+500` in `sync5` did nothing visible because `-itsoffset`
+survived A's MP4 remux only as an edit-list entry (an empty edit of 477 ms),
+which the player used for those checks evidently ignored. Offsets are now applied
+to the samples themselves, never to timestamps.
+
+**`audio.offset_ms`** is a manual trim for every source (positive delays the
+audio). The default needs none. **If your config still has `offset_ms =
+500` from the sync tests, remove it:** `peep config unset audio.offset_ms`.
+`peep doctor` flags it.
+
+**dshow is still there** as `audio.mic_backend = "dshow"`, for a microphone
+WASAPI cannot open. It gets a fixed 300 ms delay (`audio.dshow_align_ms`),
+which cannot follow its drift.
+
+**Picking devices.** `peep doctor` lists the active output and recording
+devices by name. `audio.system_device` and `audio.device` take a name (or
+a unique part of one) or an id; empty means the Windows default. To record
+what reaches the real speakers after FxSound's processing, use
+`peep config set audio.system_device "Speakers (Realtek XU)"`. Its tone
+arrives ~150 ms later than on FxSound's own device, but the alignment
+measures from capture time, so that does not matter.
+
+**Both sources** mix into one track (`amix`, each source at its own level;
+`audio.system_gain` and `audio.mic_gain` adjust). `audio.mix = "separate"`
+keeps two tracks in the file instead, system first and titled.
+
 ## Configuration
 
 `peep config --init` writes `%LOCALAPPDATA%\peep\config.toml` with every key
 commented out at its default. Unknown keys and wrong types are errors, so a
-typo can't silently fall back to a default. The ones you are most likely to
-touch:
+typo can't silently fall back to a default. You rarely need an editor:
+`peep config set audio.sources both`, `peep config get`, `peep config unset
+audio.offset_ms`. Edits keep every comment, and they are validated before
+the file is written. The keys you are most likely to touch:
 
 ```toml
 default_collection = "inbox"
@@ -234,8 +337,10 @@ default_collection = "inbox"
 scale = "1920x1200"        # default "" = native 2560x1600
 pipeline = "qsv"
 [audio]
-device = "Microphone Array on SoundWire Device (6- Realtek XU)"
-offset_ms = 0              # set from the A/V sync smoke test below
+sources = "system"         # system | mic | both | none
+mix = "mix"                # with both: one track, or "separate"
+system_device = ""         # "" = the Windows default output
+device = ""                # microphone; "" = the Windows default recording device
 [flash]
 duration_ms = 200          # 150 measured 4-5 frames; raised for margin after the smoke test
 [agent]
@@ -243,9 +348,10 @@ record_hotkey = "Ctrl+Alt+R"
 pill_position = "top-right"
 ```
 
-If Windows renumbers the mic (the `(6- ...)` part), `peep doctor` lists the
-current names and the stable `@device_cm_{...}` alternative name, and either
-works as `audio.device`.
+If Windows renumbers the mic (the `(6- ...)` part), an empty `audio.device`
+(the default) follows the Windows default recording device and needs no
+change. With `mic_backend = "dshow"`, `peep doctor` lists the dshow names and
+the stable `@device_cm_{...}` alternative name, and either works.
 
 ## Tests
 
@@ -258,8 +364,20 @@ The suite runs on the WSL side with no ffmpeg.exe, no display and no
 interop. The recorder tests cross a real process boundary to
 `tests/fake_ffmpeg.py`, a stand-in that speaks ffmpeg's stderr markers and
 honours `q`. That covers the happy path, fallback, crash mid-recording, a
-hung ffmpeg, remux failure, and `peep stop`. The real capture path is
-covered by the checklist below.
+hung ffmpeg, remux failure, and `peep stop`. Since A.1, `fake_ffmpeg.py`
+also connects to every audio socket input as ffmpeg does, and
+`tests/fake_wasapi.py` runs the real capture server (real sockets, anchors
+and gap-filling timeline) on a synthetic capture client. The tests use
+abstract Unix sockets rather than the production localhost TCP, because bale
+validates inside a network-off sandbox where a localhost TCP connect fails.
+One test exercises the real TCP listener and skips, saying why, inside that
+sandbox. Every wait in the suite is bounded, and `validation.sh` caps the run,
+so a failure there fails rather than hangs. That covers the
+audio path end to end on Linux: anchoring, every `sources` value, pipeline
+fallback with a reused child, a failing or crashing child, the clap, and a
+stalled PCM writer that must not hang the stop. The COM calls themselves
+run only on Windows: the A.1 probes exercised them on the laptop, and the
+checklist below covers them.
 
 ## Smoke-test checklist (real capture path, on the laptop)
 
@@ -275,18 +393,17 @@ marked ★ are the open questions the build could not answer itself.
 4. `peep ls` lists it. `peep open last` plays it. Check:
    - colours are right: black is black, and a window matches what was on screen;
    - the cursor is visible;
-   - your voice is audible.
+   - computer audio is audible (play something during the recording).
 5. Step frame by frame at the start and end (mpv: `.`/`,`). You should find
    about 6 magenta frames near the start and about 6 green frames near the
    end (200 ms at 30 fps; 150 ms showed 4 green frames on 2026-10-04). If a
    flash shows only 1–2 frames, raise `flash.duration_ms`.
-6. ★ A/V sync: start a recording, then click something that changes the
-   screen while saying "now", or tap the mic in view of a visible change.
-   If speech leads or lags the picture, set `audio.offset_ms` (positive
-   delays the mic) and re-check.
+6. A/V sync: see steps 42–43 (A.1). The probe measured system audio within
+   half a frame of the picture.
 7. Check the stream properties:
    `ffprobe.exe -v error -show_entries stream=codec_name,pix_fmt,width,height,color_space,color_range,r_frame_rate -of compact "<file>"`
-   should show `h264|yuv420p|2560|1600|bt709|tv|30/1` plus an `aac` stream.
+   should show `h264|yuv420p|2560|1600|bt709|tv|30/1` plus an `aac` stream
+   (48000 Hz with system audio).
 8. Open the sidecar `.json` next to the file. Check `status: ok`, that
    `capture_size` is 2560x1600, that the flash `since_ffmpeg_start_s`
    values are plausible, and `stop_reason: terminal`.
@@ -300,7 +417,7 @@ marked ★ are the open questions the build could not answer itself.
 13. `peep rec --scale 1920x1200` gives a 1920x1200 output.
 14. `peep rec --encoder qsv-download` and `peep rec --encoder x264` both
     produce good files (the fallbacks).
-15. `peep rec --no-flash --no-mic` gives no flashes and no audio stream.
+15. `peep rec --no-flash --audio none` gives no flashes and no audio stream.
 16. Run `peep rec` twice the same day without a slug. The second file
     should end in `-2`.
 17. While one recording runs, `peep rec` in another tab should refuse with
@@ -377,14 +494,67 @@ marked ★ are the open questions the build could not answer itself.
     file is kept and there is no dialog. Then `peep agent uninstall`: the
     Startup entry is gone.
 
+### Audio (session A.1)
+
+41. `peep config unset audio.offset_ms` (the 500 from the sync tests), then
+    `peep doctor`. You should hear a short tone and see `system audio:
+    'FxSound Speakers (FxSound Audio Enhancer)' (Windows default; 48000 Hz, 2
+    ch, f32le)` and `loopback capture: … test tone heard`. No `audio offset`
+    warning remains.
+42. ★ System sync: `peep rec sysync`, play a video with a clear visual and
+    audible beat (or tap a key in an app that clicks), stop, and step
+    through. You should hear the tone at the magenta flash and the beats on
+    their frames. The sidecar's `audio.system.connections[0].start_source`
+    should be `anchor`.
+43. ★ Mic sync: `peep config set audio.sources mic`, then `peep rec micsync`,
+    and say "now" as you click something visible. The voice should be on
+    the click, not half a second ahead. Repeat after 60 s of talking: it
+    should not drift. Listen for tiny dropouts, and note `audio.mic.stats`
+    (`gap_fills`, `gap_fill_frames`) in the sidecar: probe 3 saw up to five
+    gaps under 60 ms per 10 s run while dshow held the same microphone, and
+    the timeline fills each with silence. Then `peep config set
+    audio.sources system`.
+44. `peep rec --audio both` while talking over a playing video: one mixed
+    track, both audible at sane levels. With `peep config set audio.mix
+    separate`: two tracks (system, mic) in the `.mp4`
+    (`ffprobe.exe -v error -show_entries stream=index,codec_type:stream_tags=title -of compact "<file>"`).
+    Unset it afterwards.
+45. Silence: `peep rec quiet` with nothing playing for 30 s, then play a
+    sound and stop. The audio track should be as long as the video (sidecar
+    `duration_s` vs `ffprobe` audio duration), with the sound where it
+    happened.
+46. ★ The status line under `● recording` names the audio (`audio: system
+    (FxSound Speakers …)`). With the agent, a source that cannot start shows
+    a toast.
+47. ★ Device switch: start a recording, plug in or unplug headphones, keep
+    going, stop. Note what happens. The capture child may end; the recording
+    should still finish, with a warning, and the sidecar's
+    `audio.system.error` should say why.
+48. ★ Firewall: the first recording after A.1 opens localhost-only TCP
+    listeners in `python.exe`. Note whether Windows shows a firewall prompt.
+    The A.1 probes ran six of these without one.
+49. `peep config set audio.sources speakers` is refused with the list of
+    valid values, and `config.toml` is unchanged. `peep config get` lists
+    every key, marking the ones set in the file.
+
 ## Troubleshooting
 
 - **`python.exe` opens the Microsoft Store, or isn't found:** run
   `winget install Python.Python.3.12`, then `wsl --shutdown`.
 - **The qsv pipeline fails:** peep falls back on its own and says so. To
   make it permanent, set `[video] pipeline = "qsv-download"` or `"x264"`.
-- **Microphone not found:** `peep doctor` lists the dshow devices. Copy a
-  name (or its `@device_cm_...` alternative) into `[audio] device`.
+- **No computer audio in a recording:** run `peep doctor`. `loopback
+  capture` says whether the test tone reached the output device peep
+  listens to. If Windows plays through another device, set
+  `audio.system_device` to the name doctor lists. The sidecar's
+  `audio.system` block has the capture's error and statistics.
+- **Microphone not found:** `peep doctor` lists the recording devices by
+  name; `peep config set audio.device "<name>"`, or unset it to follow the
+  Windows default. With the dshow backend it lists the dshow names (and
+  `@device_cm_...` alternatives).
+- **Voice early or late:** it should not be with the default WASAPI mic.
+  If you measure a constant offset, `peep config set audio.offset_ms N`
+  (positive delays the audio) and note it for session C.
 - **A hotkey does nothing:** `peep agent status` says whether the agent is
   running and whether each chord registered. A chord another app holds
   shows `FAILED: Ctrl+Alt+R is already taken`; pick another in `[agent]`.

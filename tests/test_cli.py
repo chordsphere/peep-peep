@@ -43,6 +43,54 @@ class CliHarness(TempDirMixin):
         return code, out.getvalue(), err.getvalue()
 
 
+class ConfigCommandTest(CliHarness, unittest.TestCase):
+    """`peep config set/get/unset` (A.1) through the real CLI entry point."""
+
+    def path(self):
+        return self.tmp / "home" / "config.toml"
+
+    def test_set_get_unset(self):
+        code, out, err = self.run_cli("config", "set", "audio.offset_ms", "-120")    # a negative value parses
+        self.assertEqual(code, 0, err)
+        self.assertIn("audio.offset_ms: 0 -> -120 (uncommented the template line)", out)
+        self.assertIn("[created", out)
+        code, out, _ = self.run_cli("config", "get", "audio.offset_ms")
+        self.assertEqual((code, out.strip()), (0, "-120"))
+        code, out, _ = self.run_cli("config", "get")
+        self.assertIn("audio.offset_ms", out)
+        self.assertRegex(out, r"audio.offset_ms\s+= -120   # set in config.toml")
+        self.assertRegex(out, r'audio.sources\s+= "system"\n')
+        code, out, _ = self.run_cli("config", "unset", "audio.offset_ms")
+        self.assertIn("audio.offset_ms: -120 -> 0 (back to the commented default)", out)
+        self.assertNotIn("offset_ms", __import__("tomllib").loads(self.path().read_text())["audio"])
+
+    def test_set_refuses_bad_values_and_keys(self):
+        code, _, err = self.run_cli("config", "set", "audio.sources", "speakers")
+        self.assertEqual(code, 1)
+        self.assertIn("audio.sources must be one of", err)
+        self.assertFalse(self.path().exists())                    # refused before anything was written
+        code, _, err = self.run_cli("config", "set", "audio.sorces", "mic")
+        self.assertIn("did you mean audio.sources", err)
+        code, _, err = self.run_cli("config", "set", "audio.sources")
+        self.assertEqual(code, 2)
+        code, _, err = self.run_cli("config", "unset")
+        self.assertEqual(code, 2)
+
+    def test_set_repairs_a_broken_file(self):
+        self.path().parent.mkdir(parents=True)
+        self.path().write_text("[audio]\nsources = 'speakers'\n")
+        code, _, err = self.run_cli("ls")
+        self.assertEqual(code, 1)
+        code, out, err = self.run_cli("config", "set", "audio.sources", "both")
+        self.assertEqual(code, 0, err)
+        self.assertIn("continuing so `config` can repair the file", err)
+        self.assertEqual(self.run_cli("ls")[0], 0)
+
+    def test_path(self):
+        code, out, _ = self.run_cli("config", "path")
+        self.assertEqual(out.strip(), str(self.path()))
+
+
 class StorageCommandsTest(CliHarness, unittest.TestCase):
     def test_ls_empty(self):
         code, out, _ = self.run_cli("ls")
@@ -154,7 +202,10 @@ class StopCommandTest(CliHarness, unittest.TestCase):
         ctl.claim({"capture": "c", "final": "f.mp4", "uid": "u1"})
 
         def fake_recorder():   # what the recorder does on seeing the request
+            deadline = time.monotonic() + 20            # bounded: never hang the suite
             while not ctl.stop_requested():
+                if time.monotonic() > deadline:
+                    return
                 time.sleep(0.02)
             catalog.Catalog(self.root).append({"event": "recorded", "uid": "u1", "collection": "inbox",
                                                "file": "inbox/2026-10-05-x.mp4", "title": "x",
@@ -164,7 +215,7 @@ class StopCommandTest(CliHarness, unittest.TestCase):
         t = threading.Thread(target=fake_recorder)
         t.start()
         code, out, _ = self.run_cli("stop", "--timeout", "10")
-        t.join()
+        t.join(25)
         self.assertEqual(code, 0, out)
         self.assertIn("saved", out)
         self.assertIn("2026-10-05-x.mp4", out)
@@ -189,9 +240,29 @@ class RecCommandTest(CliHarness, unittest.TestCase):
                                         "--stdin-stop", "off")
         self.assertEqual(code, 0)
         r = seen["req"]
-        self.assertEqual((r.slug, r.collection, r.flash, r.audio, r.scale, r.pipeline, r.fps),
-                         ("my demo", "bale", False, False, "1920x1200", "x264", 60))
+        self.assertEqual((r.slug, r.collection, r.flash, r.audio_sources, r.scale, r.pipeline, r.fps),
+                         ("my demo", "bale", False, "system", "1920x1200", "x264", 60))   # --no-mic: system stays
         self.assertIn("saved X", out)
+
+    def test_rec_audio_choices(self):
+        seen = []
+
+        class FakeRecorder:
+            def __init__(self, cfg, control, status):
+                pass
+
+            def record(self, req, stop_event):
+                seen.append(req.audio_sources)
+                from peep.recorder import RecordResult
+                return RecordResult(True, "saved X (1.0s)")
+
+        with mock.patch("peep.recorder.Recorder", FakeRecorder):
+            for args in (("--audio", "both"), ("--audio", "both", "--no-mic"), ("--audio", "mic", "--no-mic"),
+                         ("--audio", "none"), ()):
+                self.assertEqual(self.run_cli("rec", "--stdin-stop", "off", *args)[0], 0)
+        self.assertEqual(seen, ["both", "system", "none", "none", "system"])
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            cli.main(["rec", "--audio", "speakers"])
 
     def test_rec_rejects_bad_scale_before_recording(self):
         code, _, err = self.run_cli("rec", "--scale", "huge", "--stdin-stop", "off")

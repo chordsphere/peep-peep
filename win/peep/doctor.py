@@ -4,10 +4,17 @@ It never installs anything; for each gap it prints the exact fix
 
 Checks: Python version, config file, data directory, ffmpeg presence and
 version, the capture inputs (ddagrab filter, dshow device), the encoders
-and GPU filters each pipeline needs, the configured microphone among the
-dshow audio devices, the storage root, tkinter for the flash, and —
-with --capture — a two-second real capture of the configured pipeline
-into ffmpeg's null muxer (nothing written).
+and GPU filters each pipeline needs, the storage root, tkinter for the
+flash, and — with --capture — a two-second real capture of the configured
+pipeline into ffmpeg's null muxer (nothing written).
+
+Audio (session A.1), through the same WASAPI child the recorder runs
+(`python -m peep.wasapi list|test`, so a COM crash costs only the check):
+the default output device and its mix format, whether the configured system
+and microphone devices resolve, and — when system audio is a source — a
+1.5 s loopback capture while a test tone plays, which proves loopback works
+on this output device end to end. A leftover audio.offset_ms from the old
+dshow sync tests is flagged, since A.1 aligns the audio by itself.
 
 The ffmpeg runner is injected so the parsing is tested against the
 outputs the session-A probe captured on the laptop.
@@ -24,8 +31,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+import json
+
 from . import ffmpeg_cmd, paths
-from .config import Config
+from .config import Config, effective_sources, source_set
 
 WINGET_FFMPEG = "winget install Gyan.FFmpeg"
 WINGET_PYTHON = "winget install Python.Python.3.12"
@@ -96,8 +105,10 @@ def _listed(name: str, text: str) -> bool:
 
 class Doctor:
     def __init__(self, cfg: Config, run: Runner = default_runner, which=shutil.which,
-                 environ: dict | None = None, python_version=sys.version_info, tk_import=None):
+                 environ: dict | None = None, python_version=sys.version_info, tk_import=None,
+                 python: str | None = None):
         self.cfg, self.run, self.which = cfg, run, which
+        self.python = python or sys.executable
         self.env = os.environ if environ is None else environ
         self.py = python_version
         self.tk_import = tk_import or (lambda: __import__("tkinter"))
@@ -108,7 +119,7 @@ class Doctor:
         out.append(self.check_ffmpeg())
         if self.ffmpeg:
             out += self.check_capabilities()
-            out.append(self.check_mic())
+        out += self.check_audio()
         out.append(self.check_storage())
         out.append(self.check_tk())
         if capture_test and self.ffmpeg:
@@ -171,19 +182,129 @@ class Doctor:
                              WINGET_FFMPEG, warn_only=(i > 0)))
         return out
 
-    def check_mic(self) -> Check:
+    # -- audio (A.1) -------------------------------------------------------------
+
+    def wasapi_argv(self, *args: str) -> list[str]:
+        """`python -m peep.wasapi ARGS`, bootstrapped with -c so it needs no
+        PYTHONPATH (the runner passes no environment)."""
+        boot = (f"import sys; sys.path.insert(0, {package_root()!r}); "
+                f"from peep.wasapi import main; raise SystemExit(main())")
+        return [self.python, "-X", "utf8", "-c", boot, *args]
+
+    def _wasapi_json(self, *args: str, timeout: float = 30) -> tuple[dict | None, str]:
+        rc, so, se = self.run(self.wasapi_argv(*args), timeout)
+        lines = [l for l in so.strip().splitlines() if l.strip()]
+        try:
+            data = json.loads(lines[-1]) if lines else None
+        except json.JSONDecodeError:
+            data = None
+        if data is None:
+            tail = " | ".join((se or so).strip().splitlines()[-3:])
+            return None, f"exit {rc}" + (f" (0x{rc & 0xFFFFFFFF:08X}: an access violation in the COM code)"
+                                         if rc in (-1073741819, 3221225477) else "") + (f": {tail}" if tail else "")
+        if data.get("ok") is False:
+            return None, data.get("error", "failed")
+        return data, ""
+
+    def check_audio(self) -> list[Check]:
         a = self.cfg.audio
-        if not a.enabled:
-            return Check("microphone", True, "audio disabled in config (audio.enabled = false)")
+        sources = effective_sources(a)
+        wanted = source_set(sources)
+        out = [Check("audio sources", True, f"{sources}" + (f" (mic via {a.mic_backend})" if "mic" in wanted else "")
+                     + ("" if wanted else " — recordings have no audio track")
+                     + "; change with `peep config set audio.sources system|mic|both|none`")]
+        if a.offset_ms:
+            out.append(Check("audio offset", False,
+                             f"audio.offset_ms = {a.offset_ms} is set; since A.1 the audio is aligned to the video "
+                             f"automatically, so a value from the old sync smoke test now shifts it the wrong way",
+                             "peep config unset audio.offset_ms   (keep it only if you re-measured after A.1)",
+                             warn_only=True))
+        needs_wasapi = "system" in wanted or ("mic" in wanted and a.mic_backend == "wasapi")
+        if not needs_wasapi:
+            if "mic" in wanted and self.ffmpeg:
+                out.append(self.check_mic())
+            return out
+        devices, err = self._wasapi_json("list")
+        if devices is None:
+            out.append(Check("audio devices", False, f"WASAPI enumeration failed: {err}",
+                             "see the log; `python -m peep.wasapi list` in the app folder shows the raw error"))
+            return out
+        if "system" in wanted:
+            out.append(self._device_check("system audio", devices, "render", a.system_device, "audio.system_device"))
+            out.append(self.check_loopback())
+        if "mic" in wanted:
+            if a.mic_backend == "wasapi":
+                out.append(self._device_check("microphone", devices, "capture", a.device, "audio.device"))
+            elif self.ffmpeg:
+                out.append(self.check_mic())
+        return out
+
+    def _device_check(self, label: str, devices: dict, flow: str, selector: str, key: str) -> Check:
+        from .wasapi import Endpoint, pick_endpoint
+        default = devices.get(f"default_{flow}") or {}
+        active = [Endpoint(**e) for e in devices.get(flow, []) if e.get("state") == "active"]
+        names = ", ".join(repr(e.name) for e in active) or "none"
+        if selector:
+            try:
+                ep = pick_endpoint(active, selector)
+            except LookupError as exc:
+                return Check(label, False, str(exc),
+                             f"peep config set {key} \"<a name from the list>\"  (or unset it for the Windows default)")
+        else:
+            if not default.get("name"):
+                return Check(label, False, f"no default {('output' if flow == 'render' else 'recording')} device "
+                                           f"({default.get('error', 'none')}); active: {names}",
+                             "set one in Windows sound settings, or name one with " + key)
+            ep = Endpoint(**default) if "id" in default else None
+        fmt = (devices.get("mix_formats") or {}).get(ep.name if ep else "", {})
+        fdesc = (f"{fmt.get('rate')} Hz, {fmt.get('channels')} ch, {fmt.get('ffmpeg_format')}" if "rate" in fmt
+                 else f"format unreadable: {fmt.get('error', '?')}")
+        origin = "configured" if selector else "Windows default"
+        ok = "rate" in fmt
+        return Check(label, ok, f"{ep.name!r} ({origin}; {fdesc}); active: {names}",
+                     None if ok else "pick another device, or report the format in the log")
+
+    def check_loopback(self) -> Check:
+        """Capture 1.5 s of system audio while a test tone plays: proves the
+        loopback path end to end on the current output device."""
+        tone = paths.data_dir(self.env) / "clap.wav"
+        try:
+            if not tone.exists():
+                from .wasapi import tone_wav
+                tone.parent.mkdir(parents=True, exist_ok=True)
+                tone.write_bytes(tone_wav(1000.0, 120, amplitude=0.4))
+        except OSError as exc:
+            return Check("loopback capture", False, f"cannot write the test tone {tone}: {exc}",
+                         "make the data dir writable", warn_only=True)
+        args = ["test", "--source", "system", "--seconds", "1.5", "--tone", str(tone)]
+        if self.cfg.audio.system_device:
+            args += ["--device", self.cfg.audio.system_device]
+        res, err = self._wasapi_json(*args)
+        if res is None:
+            return Check("loopback capture", False, f"failed: {err}", "see the log and `peep doctor` above")
+        heard = bool(res.get("non_silent"))
+        lat = res.get("tone_latency_ms")
+        detail = (f"{res.get('endpoint', {}).get('name')!r}: 1.5 s captured, test tone "
+                  + (f"heard (peak {res.get('peak')}, {lat} ms after it was played)" if heard
+                     else "NOT heard (only silence arrived)"))
+        return Check("loopback capture", heard, detail,
+                     None if heard else "unmute / raise the volume and check that Windows plays through this "
+                                        "device (a tone plays during this check); then run doctor again",
+                     warn_only=not heard)
+
+    def check_mic(self) -> Check:
+        """The dshow microphone (mic_backend = "dshow")."""
+        a = self.cfg.audio
+        device = a.device or ffmpeg_cmd.DEFAULT_MIC
         rc, so, se = self.run(ffmpeg_cmd.build_list_devices_argv(self.ffmpeg), 15)
         devices = parse_dshow_audio(so + se)
         names = {n for n, _ in devices} | {alt for _, alt in devices if alt}
         listing = "; ".join(f"{n!r} (alt {alt})" if alt else repr(n) for n, alt in devices) or "none"
-        if a.device in names:
-            return Check("microphone", True, f"{a.device!r} is listed by dshow")
-        fix = ("set [audio] device in the config to one of the names listed, or audio.enabled = false"
+        if device in names:
+            return Check("microphone (dshow)", True, f"{device!r} is listed by dshow")
+        fix = ("peep config set audio.device \"<one of the names listed>\", or audio.mic_backend wasapi"
                if devices else "connect/enable a microphone in Windows sound settings")
-        return Check("microphone", False, f"{a.device!r} not among dshow audio devices: {listing}", fix)
+        return Check("microphone (dshow)", False, f"{device!r} not among dshow audio devices: {listing}", fix)
 
     def check_storage(self) -> Check:
         root = Path(self.cfg.root)
@@ -217,9 +338,13 @@ class Doctor:
         argv.remove("-n")
         rc, so, se = self.run(argv, 30)
         tail = [l for l in (so + se).replace("\r", "").splitlines() if l.strip()][-3:]
-        return Check(f"capture test ({spec.pipeline}{' + mic' if spec.audio_device else ''})", rc == 0,
+        return Check(f"capture test ({spec.pipeline}, video only)", rc == 0,
                      f"2 s into the null muxer, exit {rc}" + ("" if rc == 0 else ": " + " | ".join(tail)),
                      "try --encoder qsv-download or x264 on `peep rec`, and see the log")
+
+
+def package_root() -> str:
+    return str(Path(__file__).resolve().parent.parent)
 
 
 def render(checks: list[Check]) -> tuple[str, int]:
