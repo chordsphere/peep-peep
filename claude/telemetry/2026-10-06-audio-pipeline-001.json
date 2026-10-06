@@ -1,0 +1,284 @@
+{
+  "record_version": 1,
+  "session_id": "2026-10-06-audio-pipeline-001",
+  "created_at": "2026-10-06T15:48:11+00:00",
+  "attempts": [
+    {
+      "at": "2026-10-06T15:48:11+00:00",
+      "outcome": "opened",
+      "command": "pack",
+      "closure_reason": null,
+      "tarball": null,
+      "validation": null,
+      "scope_kind": "write-forecast",
+      "scope": [
+        "."
+      ],
+      "overridden_paths": [],
+      "overridden_path_sources": {},
+      "required_check_overrides": [],
+      "base_drift_overrides": [],
+      "sandbox_escaped": false,
+      "network_grant_exercised": false,
+      "sandbox_confined": true,
+      "sandbox_off_source": null,
+      "cost": {
+        "tokens_in": null,
+        "tokens_out": null,
+        "usd": null,
+        "model_tier": null
+      },
+      "change_paths": [],
+      "feedback": null,
+      "log": ".bale/logs/2026-10-06-audio-pipeline-001.log",
+      "bundle": {
+        "stem": "2026-10-05-audio-pipeline",
+        "brief_sha256": "845279a0064869d4e179f4dcffe6d4ba3294cfd5169eed5548abfd3c3103ee44",
+        "checkpoint_sha256": null,
+        "manifest_sha256": "56d8e0a1f511042a694a57bc87701fed7d6f7e1e07bf79778a191450cac469fb"
+      },
+      "provenance": {
+        "work_class": "code",
+        "packer": "chordsphere",
+        "packed_at": "2026-10-06T15:48:10+00:00"
+      }
+    },
+    {
+      "at": "2026-10-06T20:38:42+00:00",
+      "outcome": "rejected",
+      "command": "apply",
+      "closure_reason": null,
+      "tarball": "response-2026-10-06-audio-pipeline-001 (1).tar.gz",
+      "validation": null,
+      "scope_kind": "write-forecast",
+      "scope": [
+        "."
+      ],
+      "overridden_paths": [],
+      "overridden_path_sources": {},
+      "required_check_overrides": [],
+      "base_drift_overrides": [],
+      "sandbox_escaped": false,
+      "network_grant_exercised": false,
+      "sandbox_confined": true,
+      "sandbox_off_source": null,
+      "cost": {
+        "tokens_in": null,
+        "tokens_out": null,
+        "usd": null,
+        "model_tier": null
+      },
+      "change_paths": [],
+      "feedback": null,
+      "log": ".bale/logs/2026-10-06-audio-pipeline-001.log",
+      "cause": "could not create branch bale/2026-10-06-audio-pipeline-001: fatal: a branch named 'bale/2026-10-06-audio-pipeline-001' already exists"
+    },
+    {
+      "at": "2026-10-06T20:42:58+00:00",
+      "outcome": "applied",
+      "command": "apply",
+      "closure_reason": null,
+      "tarball": "response-2026-10-06-audio-pipeline-001 (1).tar.gz",
+      "validation": {
+        "state": "PASS",
+        "exit_code": 0,
+        "claims": {
+          "unit tests (pytest, else unittest; tests/)": {
+            "value": "pass",
+            "claim_basis": "observed"
+          }
+        },
+        "claim_verdict": {
+          "unit tests (pytest, else unittest; tests/)": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          }
+        },
+        "reconciliation_parsed": true,
+        "validation_will_run": [
+          "python syntax (files this response creates or changes)",
+          "unit tests (pytest, else unittest; tests/)",
+          "B's agent, dialog, pill, hotkeys and siblings byte-identical; pyproject unchanged (no dependencies)",
+          "the offset is never -itsoffset (sample-domain or anchor only), for every sources value",
+          "default audio source is system; mic, both and none are options",
+          "config set keeps every comment and uncomments the template line; unset round-trips byte-for-byte",
+          "loopback capture is pure standard library (no pip packages)",
+          "sidecar schema stays peep.sidecar/1 (A.1's audio fields are additive)",
+          "real ffmpeg: a stalled PCM writer cannot hang q (with -rw_timeout)",
+          "bin/peep executable (TARBALL.md 7.7)"
+        ]
+      },
+      "scope_kind": "write-forecast",
+      "scope": [
+        "."
+      ],
+      "overridden_paths": [],
+      "overridden_path_sources": {},
+      "required_check_overrides": [],
+      "base_drift_overrides": [],
+      "sandbox_escaped": false,
+      "network_grant_exercised": false,
+      "sandbox_confined": true,
+      "sandbox_off_source": null,
+      "cost": {
+        "tokens_in": null,
+        "tokens_out": null,
+        "usd": null,
+        "model_tier": null
+      },
+      "change_paths": [
+        "README.md",
+        "bin/peep",
+        "tests/__init__.py",
+        "tests/fake_ffmpeg.py",
+        "tests/fake_wasapi.py",
+        "tests/test_cli.py",
+        "tests/test_config.py",
+        "tests/test_configedit.py",
+        "tests/test_doctor.py",
+        "tests/test_ffmpeg_cmd.py",
+        "tests/test_marks.py",
+        "tests/test_recorder.py",
+        "tests/test_wasapi.py",
+        "win/peep/catalog.py",
+        "win/peep/cli.py",
+        "win/peep/config.py",
+        "win/peep/configedit.py",
+        "win/peep/doctor.py",
+        "win/peep/ffmpeg_cmd.py",
+        "win/peep/flash.py",
+        "win/peep/recorder.py",
+        "win/peep/wasapi.py"
+      ],
+      "feedback": {
+        "mechanical": {
+          "response_kind": "normal",
+          "schema_valid": true,
+          "mirror_agreement": {
+            "changes_to_files": true,
+            "files_to_changes": true
+          },
+          "claims_subset": true,
+          "provenance": {
+            "bale_version": "0.4.45",
+            "contract_docs": {
+              "AGENT.md": "5124250b3d6362ae362801f89e2c0498a6e493c638a398de2f4c3d13d6c12285",
+              "TARBALL.md": "32680c8efcfb1c56c486846d0187063d38b7c5333e48c553db1a9ae0b2d118b1",
+              "DOCS.md": "90cc9aad0670610b7865a54db33975103580cdd3354d000b8db07f8a6e956d0c",
+              "CODE.md": "49a145323bfc472a22dd8be56565d6e7767fd1ffbd33c36cda95e7e3e149ab75",
+              "PLANNER.md": "5af584b98ed0591b57fbb146baf1441f8130a894e050882d22b3cd62c5cd17d5"
+            },
+            "packer": "chordsphere",
+            "work_class": "code",
+            "checkpoint": null,
+            "checkpoint_scope_admitted": false,
+            "packed_at": "2026-10-06T15:48:10+00:00",
+            "base_files": {
+              ".gitignore": "be556e2cd3057567ca2806a9a3f877e080beede941b98dc77150b7813c20f40e",
+              "README.md": "c7a63720b51de25515f19deb4d56e931d35cb3eee031792202dbf751569b5aa8",
+              "bin/peep": "ee3679da3b8bdf388f3268929abcdf37b9c980be58f5bf134a5df37d8ab53d4b",
+              "claude/responses/2026-10-05-engine-storage-core-002/notes.md": "5ac2235ed730692ab5fcfbb67c81a03676f2040d666b1b707cd73a53688424ed",
+              "claude/responses/2026-10-05-resident-agent-003/notes.md": "0026815638d659295deb1f405e76ef0149bbcf026c66a99a484a760f52ac0c86",
+              "claude/telemetry/2026-10-05-engine-storage-core-002.json": "3d19cdf2556dd26e6a4c669b7dfea5271783e5f46d3a6251d1665c0bf9f31d3c",
+              "claude/telemetry/2026-10-05-resident-agent-003.json": "4bbcc1f03086ad8bf59f22f8443ded8a894eee92af6244cac6e90136aa935cb9",
+              "pyproject.toml": "583f0f265e8cb543625e5679788544f772e185cde9fbf408b6b96e4010482af3",
+              "start.md": "8d7235777c4466098fcbee355c33af1a7224b8f7b7e845ee718d8f6d6442c682",
+              "tests/__init__.py": "9901684a56e356e12bafef6b13270a145e8b3e8eb87ed3311bc39fc2b128447d",
+              "tests/fake_ffmpeg.py": "521bff234b57fa64a2fd3d6d56585b138443572325bb4d2bb8a50267ed6d5fde",
+              "tests/test_agent.py": "70ade9452cfdb1e2090090421009563810096d3de903c20588c4a7d1a0f337ac",
+              "tests/test_agentcli.py": "39dbda942870afed0ed085f7a57ae193cce86fa97a81a9bd78dff6acd3d702ef",
+              "tests/test_catalog.py": "e2adeb256ca2d7f5fff5e87acaba05fdd3c830f34f938528643de3f93b4cac6b",
+              "tests/test_cli.py": "5a0332ac65cd619528cd6f3808dc3d2f5f7b3d2315a27af3161b321d18c806d3",
+              "tests/test_config.py": "728059df416cc55b42540e459afb27c9269da3ea1508a2872c881d5f0ae75a0f",
+              "tests/test_control.py": "abd0687a18df4b94d6e0bae4776b500f0cfed7e85726134f74322538ddc3dfed",
+              "tests/test_dialog.py": "19899e04598127a1730782fdc71c16a73d53f7175acd7f357b21aed7e6a3654b",
+              "tests/test_doctor.py": "b56f4ff601ab58163a347a21dba71b0bb51714d3297788ff0d738fcae907cc53",
+              "tests/test_ffmpeg_cmd.py": "69a6a431ccde75181422b858c740d24be610c2f53a5dc93b600df1108cec4b53",
+              "tests/test_hotkeys.py": "e4230dadc0106882965e7cb8ecfc0362be72ddef837412b304fc45fe93a4c028",
+              "tests/test_lifecycle.py": "1c8e2d9707589ab5cb5facac79207e932c6b27c9188b11ffff96216a82256711",
+              "tests/test_marks.py": "cbefed5fb5a2076625610a76a6316a17e17c6c4df6170a926272f2f634523d12",
+              "tests/test_naming.py": "02245a325b8eccea642863658c9217d399b1c9057e4d32f1b52c50a5cd0cfde8",
+              "tests/test_recorder.py": "7cf649dd3ef53f5d73ed2b881fa4fce881b857d42694e864ddbd9c53d48806d1",
+              "tests/test_shim.py": "a6cee1289b299300829e39cbcfa1c07610da0d25665f8758a6fb1836be402e0c",
+              "win/peep/__init__.py": "6e87c0cdb7018a8cfcb35ec7b5d0cb8aaee6b0b52a3b5a64dd61f7c01ee1bbd4",
+              "win/peep/__main__.py": "f5c32d04986abec782824be436da94704abd3a940faa65868b21928f00ef3e46",
+              "win/peep/agent.py": "14d73d20728c73086afc4e537f5c4e6e87b516db5eca63298390b24efc305af2",
+              "win/peep/agentcli.py": "5eee1e5b10a50a70dc67dfae13de34539260fe8e1c3d672dfa3fd1a2235eb6ee",
+              "win/peep/catalog.py": "03e3db97295899ea1cc54fe479ecbe0936ca7fdc894e00f2dfdf782dede46af7",
+              "win/peep/cli.py": "fbb96ece1082214e7b125cabc000820096a257e4bbf0c1348643db8031d9cc7f",
+              "win/peep/config.py": "c16c3c966bbf073aa33244575cc85ac410bfaf2a38a98d0932929360c40b643f",
+              "win/peep/control.py": "8542310ab4227bd3ed43e31d0d0e6ffa0e13d3a3b2966eea7fbe6ee853ddb115",
+              "win/peep/dialog.py": "c5d803fd0aaca0877f51c9950fbaff581063b5ea9b9f3d662fd31297538f365c",
+              "win/peep/doctor.py": "55f2487406eae425030488d7098f6a9557053f5a52f6b45a39caaa6fefb7562f",
+              "win/peep/ffmpeg_cmd.py": "1756819b27c171a993c4b18bb461d80352f86985298b197854bfff139a16d386",
+              "win/peep/flash.py": "ad05b0e3dcd18928cbfce56485fd1131f20522753c08ef92930b543474029f52",
+              "win/peep/hotkeys.py": "e9afac203f5d73c03b65f225c66d7fa34cdd1f04238a3095e0391bc094584b38",
+              "win/peep/lifecycle.py": "bd21750ffb3c13c78f5e65b1a984f52bd2a580559b60602e76e1940d7d59237f",
+              "win/peep/logsetup.py": "f770126d30c631410f5a51816b7babf198b9e064c76c5949858ddb58ada38b1c",
+              "win/peep/naming.py": "cf3fa74e5632ca0deca88eb418a82a5c49d6873b0ac0bf7af7e921e17f53c672",
+              "win/peep/paths.py": "6d9956681597493d89f8193464204ba36d894dd62ae96513f886ac84e3f3157b",
+              "win/peep/pill.py": "e4c1a0ba8a902c427674c4048256b7be0461494811e56420973a70e178adf4fc",
+              "win/peep/recorder.py": "17962dfa4c329539c764b9b0d28e1cc622bae6fd2c0899ddb0f01a1078b3c5ab",
+              "win/peep/ui.py": "8c6b65678b764300cbdca9aec2125ec4992383b32a3256037a88fbd98a40dbfb",
+              "win/peep/winapi.py": "0224a454f2776585bdf760f80a910d5b61a1e3a62a19ef470c17f025e5eb20e8",
+              "win/peepw.py": "4d1235bb3d52360257fdb3aaf15cc64179150b380c83645236ccd924f1eaeb55"
+            },
+            "model_identity": "anthropic:claude-opus-5-5"
+          },
+          "linkage": {
+            "kind": "probe",
+            "point": "pre-build",
+            "depends_on": null
+          }
+        },
+        "self_reported": {
+          "assumptions": [
+            "The 58 ms video-epoch lead measured on the qsv pipeline holds for the qsv-download and x264 fallbacks (they open the same ddagrab input first); not measured",
+            "Windows Python's sys.executable under the agent is pythonw.exe and capture children spawned from it behave like the python.exe ones the probes ran",
+            "The player used for the sync tests ignored the MP4 empty edit that carried sync5's -itsoffset; inferred from the elst and the architect's report, the player was not probed",
+            "unshare -rn reproduces the part of bale's validation sandbox that matters here (loopback TCP connect fails); the probe confirmed that behaviour on the laptop, and the suite passes under it"
+          ],
+          "judgment_calls": [
+            "Microphone moved from dshow to our WASAPI capture (default mic_backend wasapi), because the probe measured the dshow track leading 240-431 ms and drifting within a recording; dshow kept as a backend with a fixed 300 ms sample-domain delay",
+            "One child process per audio source (crash isolation for the hand-declared COM vtables) instead of a thread in the recorder",
+            "Localhost TCP with ffmpeg -rw_timeout 3 s as the PCM transport: the probe showed a stalled writer hangs q without the timeout; named pipes worked but have no read timeout",
+            "Anchor = QPC of ffmpeg's Input #0 line minus 58 ms (pooled probe mean), fallback connect minus 430 ms",
+            "audio.offset_ms redefined as a manual trim for every source, applied by anchor (WASAPI) or adelay/atrim (dshow), never -itsoffset",
+            "audio.device default changed to empty (Windows default recording device)",
+            "A source that cannot start is a loud warning and the recording continues (A's flash-unavailable precedent)",
+            "Clap shipped: 120 ms 1 kHz tone at the start flash when system audio is recorded",
+            "Dialog audio status line deferred to keep B's modules byte-identical",
+            "Tests moved to abstract AF_UNIX sockets via an injectable capture listener (production stays TCP) after the first apply hung in bale's network-off sandbox; two bounded-wait edits to B's tests"
+          ],
+          "budget_pressure": "none",
+          "includes_missing": [],
+          "compaction_occurred": {
+            "occurred": false,
+            "disclosure_ref": null
+          },
+          "docs_read": [
+            "manifest.json",
+            "AGENT.md core (META through 11.2)",
+            "README.md (the request brief)",
+            "TARBALL.md sections 1, 2, 4, 5, 7, 8, 10 (3.3 skimmed)",
+            "start.md, both prior claude/responses/*/notes.md, README.md, and the win/peep modules and tests this session extended",
+            "tools/craft_response.py (imports, probe scaffold, --help) and tools/response_lint.py (feedback schema)"
+          ],
+          "light_blocks": 0
+        }
+      },
+      "log": ".bale/logs/2026-10-06-audio-pipeline-001.log",
+      "clarification": {
+        "rounds": 0,
+        "records": []
+      },
+      "corrects": "2026-10-06-audio-pipeline-001",
+      "checkpoint": {
+        "configured": false
+      }
+    }
+  ],
+  "updated_at": "2026-10-06T20:42:58+00:00",
+  "outcome": "applied"
+}
