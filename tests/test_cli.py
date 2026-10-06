@@ -1,11 +1,15 @@
 """Windows-side CLI: argument handling and the storage commands, run
-through `cli.main` against a temporary data dir and storage root."""
+through `cli.main` against a temporary data dir and storage root; and
+(session A.2) the `rec` process's clean exit on every stop path, run as
+a real child process so interpreter shutdown is part of the test."""
 
 import contextlib
 import io
 import json
 import logging
 import os
+import subprocess
+import sys
 import threading
 import time
 import unittest
@@ -270,10 +274,41 @@ class RecCommandTest(CliHarness, unittest.TestCase):
         self.assertIn("scale must be", err)
 
     def test_watch_stdin_line_and_eof(self):
-        for data in (b"stop\n", b""):
+        for data, close in ((b"stop\n", False), (b"q", False), (b"", True)):
+            r, w = os.pipe()
+            try:
+                os.write(w, data)
+                if close:
+                    os.close(w)
+                ev = threading.Event()
+                cli.watch_stdin(ev, r).join(2)
+                self.assertTrue(ev.is_set(), data)
+            finally:
+                os.close(r)
+                if not close:
+                    os.close(w)
+
+    def test_watch_stdin_read_error_is_a_stop(self):
+        # A directory fd: read() raises OSError (EISDIR) — the same path as EIO/EBADF
+        # when the terminal side vanished. A stop, logged, never a dead thread.
+        fd = os.open(os.path.dirname(__file__), os.O_RDONLY)
+        try:
             ev = threading.Event()
-            cli.watch_stdin(ev, io.BytesIO(data)).join(2)
-            self.assertTrue(ev.is_set(), data)
+            with self.assertLogs("peep.cli", "WARNING") as logs:
+                cli.watch_stdin(ev, fd).join(2)
+        finally:
+            os.close(fd)
+        self.assertTrue(ev.is_set())
+        self.assertIn("stdin.read_failed", logs.output[0])
+
+    def test_watch_stdin_without_a_stdin(self):
+        ev = threading.Event()
+        with mock.patch("sys.stdin", None):                     # pythonw.exe
+            self.assertIsNone(cli.watch_stdin(ev))
+        with mock.patch("sys.stdin", io.StringIO("")), self.assertLogs("peep.cli", "WARNING") as logs:
+            self.assertIsNone(cli.watch_stdin(ev))              # a stream with no descriptor
+        self.assertIn("stdin.unwatchable", logs.output[0])
+        self.assertFalse(ev.is_set())
 
     def test_status_output_survives_a_vanished_terminal(self):
         class Dead:
@@ -292,6 +327,154 @@ class RecCommandTest(CliHarness, unittest.TestCase):
         self.assertEqual(cli.format_duration(0), "0:00")
         self.assertEqual(cli.format_duration(61.4), "1:01")
         self.assertEqual(cli.format_duration(None), "?")
+
+
+# ---------------------------------------------------------------------------
+# Session A.2: the interpreter-shutdown crash after an external stop
+# ---------------------------------------------------------------------------
+
+# A real `rec` process (cli.main, real sys.stdin, real interpreter shutdown) whose
+# recording can end without stdin's help, the way `peep stop` or the agent's hotkey
+# ends a terminal-started one. The fake recorder prints "recording", then waits for
+# either the flag file (standing in for the control file's stop request) or the
+# stdin stop, and returns success. argv: <win dir> <flag path>.
+REC_CHILD = r'''
+import os, sys, time
+sys.path.insert(0, sys.argv[1])
+from unittest import mock
+from peep import cli
+from peep.recorder import RecordResult
+
+FLAG = sys.argv[2]
+
+
+class ExternalStopRecorder:
+    def __init__(self, cfg, control, status):
+        self.status = status
+
+    def record(self, req, stop_event):
+        self.status("recording")
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if os.path.exists(FLAG):
+                self.status("stopped by external request")
+                return RecordResult(True, "saved X (1.0s)")
+            if stop_event.is_set():
+                self.status("stopped by stdin")
+                return RecordResult(True, "saved X (1.0s)")
+            time.sleep(0.02)
+        return RecordResult(False, "test child: no stop within 30 s")
+
+
+with mock.patch("peep.recorder.Recorder", ExternalStopRecorder):
+    code = cli.main(["rec", "--no-flash"])
+sys.exit(code)
+'''
+
+# The pattern A shipped (a daemon thread blocked in sys.stdin.buffer.readline() when
+# the main thread returns), used only to prove the harness reproduces the ordering.
+OLD_PATTERN_CHILD = ("import sys, threading, time; "
+                     "threading.Thread(target=sys.stdin.buffer.readline, daemon=True).start(); "
+                     "time.sleep(0.3); print('returning', flush=True)")
+
+
+def rec_child_env(tmp) -> dict:
+    env = {k: v for k, v in os.environ.items() if k not in ("PEEP_CONFIG", "LOCALAPPDATA")}
+    env.update(PEEP_HOME=str(tmp / "home"), USERPROFILE=str(tmp / "profile"), PYTHONDONTWRITEBYTECODE="1")
+    return env
+
+
+def rec_child_argv(flag) -> list[str]:
+    from tests import WIN
+    return [sys.executable, "-B", "-c", REC_CHILD, str(WIN), str(flag)]
+
+
+def stop_externally_when_recording(proc, flag, out: list) -> threading.Thread:
+    """Read the child's stdout; once it says "recording" (the stdin watcher is
+    started before the recorder, and gets a moment to block in its read), create
+    the flag — the external stop. Collects every stdout line into `out`."""
+    def run():
+        for raw in iter(proc.stdout.readline, b""):
+            line = raw.decode("utf-8", "replace").rstrip("\n")
+            out.append(line)
+            if line == "recording":
+                time.sleep(0.3)
+                flag.write_text("stop", encoding="utf-8")
+    t = threading.Thread(target=run, name="test-external-stop", daemon=True)
+    t.start()
+    return t
+
+
+class StdinShutdownTest(TempDirMixin, unittest.TestCase):
+    """Every stop path exits the `rec` process cleanly: exit code 0 and nothing at
+    all on stderr. The parent plays the shim: it holds the child's stdin open until
+    the child has exited, unless the case is the shim itself going away."""
+
+    def run_rec_child(self, stdin_action: str):
+        flag = self.tmp / "stop-request.flag"
+        proc = subprocess.Popen(rec_child_argv(flag), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, env=rec_child_env(self.tmp))
+        out = []
+        try:
+            if stdin_action == "external":
+                reader = stop_externally_when_recording(proc, flag, out)
+            else:
+                reader = threading.Thread(target=lambda: out.extend(
+                    raw.decode("utf-8", "replace").rstrip("\n") for raw in iter(proc.stdout.readline, b"")),
+                    daemon=True)
+                reader.start()
+                deadline = time.monotonic() + 20
+                while "recording" not in out and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                time.sleep(0.3)
+                if stdin_action == "line":
+                    proc.stdin.write(b"stop\n")       # q/Enter/Ctrl-C in the terminal, via the shim
+                    proc.stdin.flush()
+                elif stdin_action == "close":
+                    proc.stdin.close()                # the shim died / its terminal closed
+            code = proc.wait(timeout=30)              # stdin still open here unless the case closed it
+            reader.join(5)
+            err = proc.stderr.read()
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                stream.close()
+        return code, out, err
+
+    def test_external_stop_exits_cleanly_with_stdin_still_open(self):
+        code, out, err = self.run_rec_child("external")
+        self.assertIn("stopped by external request", out)      # not a stdin stop
+        self.assertEqual(err, b"", err.decode("utf-8", "replace"))
+        self.assertEqual(code, 0)
+        self.assertIn("✓ saved X (1.0s)", out)
+
+    def test_stop_line_on_stdin_exits_cleanly(self):
+        code, out, err = self.run_rec_child("line")
+        self.assertIn("stopped by stdin", out)
+        self.assertEqual((code, err), (0, b""), err.decode("utf-8", "replace"))
+
+    def test_stdin_closing_is_a_stop_and_exits_cleanly(self):
+        code, out, err = self.run_rec_child("close")
+        self.assertIn("stopped by stdin", out)
+        self.assertEqual((code, err), (0, b""), err.decode("utf-8", "replace"))
+
+    def test_harness_reproduces_the_old_shutdown_crash(self):
+        """Guards the tests above against going vacuous: with stdin held open, the
+        pre-A.2 reader pattern must crash this interpreter at shutdown."""
+        proc = subprocess.Popen([sys.executable, "-B", "-c", OLD_PATTERN_CHILD], stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            code = proc.wait(timeout=30)
+            err = proc.stderr.read()
+        finally:
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                stream.close()
+        if b"_enter_buffered_busy" not in err:
+            self.skipTest(f"this interpreter ({sys.version.split()[0]}) does not crash on the old pattern "
+                          f"(exit {code}); the clean-exit tests above prove less here")
+        self.assertNotEqual(code, 0)
 
 
 if __name__ == "__main__":

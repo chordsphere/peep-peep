@@ -19,9 +19,9 @@ run directly from any Windows console.
 Exit codes: 0 success, 1 failure (message on stderr), 2 usage error.
 
 Sections:
-  1. Parser                     (~line 43)
-  2. Commands                   (~line 106)
-  3. Entry point                (~line 341)
+  1. Parser                     (~line 44)
+  2. Commands                   (~line 107)
+  3. Entry point                (~line 369)
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import subprocess
 import sys
 import threading
@@ -134,17 +135,44 @@ def _control(env=None) -> Control:
     return Control(paths.state_dir(env), winapi.pid_alive)
 
 
-def watch_stdin(stop_event: threading.Event, stream=None) -> threading.Thread:
-    """Set `stop_event` on any line from stdin, or when stdin closes (the
+def stdin_fd() -> int | None:
+    """The process's stdin file descriptor, or None when there is none to
+    watch (pythonw.exe has sys.stdin None; a replaced stream may have no fd)."""
+    if sys.stdin is None:
+        return None
+    try:
+        return sys.stdin.fileno()
+    except (OSError, ValueError, AttributeError) as exc:   # io.UnsupportedOperation is both
+        event(log, logging.WARNING, "stdin.unwatchable", error=repr(exc))
+        return None
+
+
+def watch_stdin(stop_event: threading.Event, fd: int | None = None) -> threading.Thread | None:
+    """Set `stop_event` on any input on stdin, or when stdin closes (the
     shim exiting or its terminal closing must stop the recording, not
-    orphan it)."""
-    stream = stream if stream is not None else getattr(sys.stdin, "buffer", None)
+    orphan it). Returns the watcher thread, or None if there is no stdin.
+
+    Reads the raw descriptor with os.read, never sys.stdin/sys.stdin.buffer
+    (session A.2). When the stop comes from elsewhere — `peep stop`, or the
+    agent's hotkey on a terminal recording — this thread is still blocked in
+    the read when the main thread returns, because the shim keeps the pipe
+    open until the child exits. A BufferedReader holds its internal lock for
+    the whole blocking read, and the interpreter's finalizer must take that
+    lock to close sys.stdin: after a 1 s grace it aborts with "Fatal Python
+    error: _enter_buffered_busy ... <stdin>" (exit code 3 on Windows), after
+    the file was saved. os.read holds no Python-level lock, so finalization
+    proceeds and the blocked daemon thread simply ends with the process.
+    Any bytes count as a stop: the shim sends one 'stop' line, and a console
+    read returns on Enter."""
+    fd = stdin_fd() if fd is None else fd
+    if fd is None:
+        return None
 
     def run():
         try:
-            line = stream.readline()
-            event(log, logging.INFO, "stdin.stop", eof=not line)
-        except (OSError, ValueError) as exc:
+            data = os.read(fd, 4096)
+            event(log, logging.INFO, "stdin.stop", eof=not data)
+        except OSError as exc:      # EIO/EBADF: the terminal side vanished — a stop, not a crash
             event(log, logging.WARNING, "stdin.read_failed", error=repr(exc))
         stop_event.set()
 
@@ -158,7 +186,7 @@ def cmd_rec(args, cfg) -> int:
     if args.scale is not None:
         config_mod.parse_scale(args.scale)
     stop_event = threading.Event()
-    if args.stdin_stop == "line" and sys.stdin is not None:
+    if args.stdin_stop == "line":
         watch_stdin(stop_event)
     sources = config_mod.effective_sources(cfg.audio, args.audio, args.no_mic)
     req = RecordRequest(slug=args.slug, collection=args.collection,

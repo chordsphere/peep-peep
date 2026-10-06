@@ -246,6 +246,40 @@ class RecKeysTest(unittest.TestCase):
             self.assertFalse(shim.is_stop_key(k))
 
 
+class ExternalStopThroughShimTest(TempDirMixin, unittest.TestCase):
+    """Session A.2, end to end on the WSL side: run_rec drives a real `rec` child
+    (cli.main on this interpreter, fake recorder) whose recording is stopped from
+    outside — `peep stop`, or the agent's hotkey on a terminal recording. No key is
+    pressed and our stdin stays open, so the shim sends nothing and keeps the
+    child's stdin open until it exits. The child must exit 0 with empty stderr."""
+
+    def test_external_stop_exits_cleanly(self):
+        from tests.test_cli import rec_child_argv, rec_child_env, stop_externally_when_recording
+        flag = self.tmp / "stop-request.flag"
+        r, w = os.pipe()                          # our terminal: open, silent
+        procs, out = [], []
+
+        def popen(argv, **kw):
+            p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 env=rec_child_env(self.tmp), **kw)
+            procs.append(p)
+            stop_externally_when_recording(p, flag, out)
+            return p
+
+        try:
+            code = shim.run_rec(rec_child_argv(flag), None, stdin_fd=r, popen=popen)
+        finally:
+            os.close(r)
+            os.close(w)
+        err = procs[0].stderr.read()
+        procs[0].stderr.close()
+        procs[0].stdout.close()
+        self.assertTrue(procs[0].stdin.closed)    # run_rec closed it after the exit
+        self.assertIn("stopped by external request", out)
+        self.assertEqual(err, b"", err.decode("utf-8", "replace"))
+        self.assertEqual(code, 0)
+
+
 class ShimDoctorTest(TempDirMixin, unittest.TestCase):
     def test_reports_python_and_copy(self):
         env = {"HOME": str(self.tmp), "PATH": f"/usr/bin:{self.tmp}/.local/bin"}
