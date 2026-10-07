@@ -5,6 +5,12 @@ global hotkeys, the REC pill, the stop dialog, marks, and its own lifecycle.
                last-used collection). Recording: stop, then the naming dialog.
   Ctrl+Alt+M   drop a mark: a cyan flash and an entry in the sidecar's `marks`
   Ctrl+Alt+X   stop and delete the current take (catalogued as discarded)
+  Ctrl+Alt+P   hard pause / resume (session C1a): capture stops, the next press opens a new segment
+  Ctrl+Alt+T   take: open one, or close the open one (a blue / red corner patch)
+  Ctrl+Alt+Backspace
+               retake: discard the most recent take, open a fresh one (a yellow corner patch)
+               (all three, like mark, act on any live recording through control files;
+               the recorder decides them in events.EventModel, debounce included)
 
 Threads: the Tk thread runs everything in this class (through ui.post /
 ui.every, serialised by the UI dispatcher); the hotkey listener thread
@@ -37,11 +43,12 @@ import logging
 import os
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import __version__, catalog, config as config_mod, dialog, hotkeys, lifecycle, naming, paths
+from . import __version__, catalog, config as config_mod, dialog, events, hotkeys, lifecycle, naming, paths
 from .catalog import write_json_atomic
 from .control import AgentAlreadyRunning, AgentControl, AlreadyRecording, Control
 from .logsetup import event
@@ -106,6 +113,9 @@ class Prefs:
 TICK_MS = 250
 CONFIG_CHECK_EVERY = 8          # ticks: the config file's mtime is checked every 2 s
 STOP_REASONS = {"stop": "hotkey", "discard": "hotkey-discard", "exit": "agent-exit"}
+# Session C1a: hotkey action -> the control-file request it writes (the pause chord toggles).
+EVENT_ACTIONS = {"pause": "pause-toggle", "take": "take", "retake": "retake"}
+PILL_STATES = ("starting", "recording", "pausing", "paused", "resuming", "stopping")
 
 
 @dataclass
@@ -205,7 +215,9 @@ class Agent:
     # -- hotkeys (listener thread -> UI thread) ---------------------------------------
 
     def on_hotkey(self, action: str, foreground: ForegroundInfo | None) -> None:
-        self.ui.post(self.handle, action, foreground)
+        # Stamped here, on the listener thread the instant WM_HOTKEY arrives: the take/retake
+        # event's time is the press, not when the UI thread or the recorder got to it.
+        self.ui.post(self.handle, action, foreground, time.perf_counter(), catalog.now_iso())
 
     def _on_problem_thread(self, action, chord, message, final) -> None:
         self.ui.post(self._hotkey_problem, action, chord, message, final)
@@ -222,7 +234,8 @@ class Agent:
         self._toast(text, "error", 12)
         self._publish()
 
-    def handle(self, action: str, foreground: ForegroundInfo | None = None) -> None:
+    def handle(self, action: str, foreground: ForegroundInfo | None = None, qpc: float | None = None,
+               at: str | None = None) -> None:
         if self.exiting:
             event(log, logging.INFO, "agent.hotkey_ignored", action=action, why="exiting")
             return
@@ -232,8 +245,28 @@ class Agent:
             self._on_mark()
         elif action == "discard":
             self._on_discard()
+        elif action in EVENT_ACTIONS:
+            self._on_event(action, qpc, at)
         else:
             event(log, logging.WARNING, "agent.unknown_action", action=action)
+
+    def _on_event(self, action: str, qpc: float | None, at: str | None) -> None:
+        """Pause / take / retake: a request for whichever recording is live (the
+        agent's own or a terminal one). The recorder decides it (debounce, take
+        state), shows the corner patch and publishes the result for the pill."""
+        if self.session is not None and self.session.stop_kind is not None:
+            self._toast("still saving the last take…", "info", 2)
+            return
+        try:
+            self.control.request_event(EVENT_ACTIONS[action], "hotkey", qpc=qpc, at=at)
+        except LookupError:
+            self._toast(f"nothing is recording, so there is nothing to {action}", "info", 2.5)
+            return
+        except OSError as exc:
+            event(log, logging.ERROR, "agent.event_failed", action=action, error=repr(exc))
+            self._toast(f"{action} failed: {exc}", "error", 6)
+            return
+        event(log, logging.INFO, "agent.event_requested", action=action)
 
     def _on_record(self, foreground) -> None:
         if self.session is not None:
@@ -368,11 +401,9 @@ class Agent:
 
     def _open_dialog(self, session: Session, result) -> None:
         media: Path = result.media_path
-        stem = catalog.sidecar_path(media).stem
-        try:
-            _, auto_slug, _ = naming.split_stem(stem)
-        except naming.NamingError:
-            auto_slug = stem
+        # The prefill is the name the file actually has, counter included ("...-2"): before
+        # C1a it dropped the counter and so offered the name of another recording (notes.md).
+        auto_slug = naming.slug_of_stem(catalog.sidecar_path(media).stem)
         try:
             size = media.stat().st_size
         except OSError:
@@ -383,11 +414,15 @@ class Agent:
         except OSError as exc:
             event(log, logging.WARNING, "agent.recent_collections_failed", error=repr(exc))
             recent = []
+        if getattr(result, "size_bytes", None) is not None:
+            size = result.size_bytes
+        uid = result.uid
         model = dialog.DialogModel(
             name=auto_slug, collection=session.collection,
             choices=dialog.collection_choices(session.collection, recent, self.cfg.default_collection),
-            status=dialog.status_line(result.duration_s, size, str(media)))
-        uid = result.uid
+            status=dialog.status_line(result.duration_s, size, str(media),
+                                      events.summary_line(getattr(result, "summary", None))),
+            preview=lambda name, collection: self.save_preview(uid, name, collection))
 
         def on_result(action, name, collection, options):
             return self.dialog_result(uid, session.collection, media.name, action, name, collection)
@@ -412,22 +447,39 @@ class Agent:
             if problem:
                 return problem
             try:
-                entry = catalog.rename(root, uid, choice.name, choice.collection)
+                entry = catalog.rename(root, uid, choice.name, choice.collection, live_uid=self._live_uid())
             except (OSError, LookupError, naming.NamingError, ValueError) as exc:
                 event(log, logging.ERROR, "agent.rename_failed", uid=uid, error=repr(exc))
                 return f"could not rename: {exc}"
             self.prefs.set_last_collection(choice.collection)
-            self._toast(f"saved {entry.file}", "info", 4)
-            event(log, logging.INFO, "agent.dialog_save", uid=uid, file=entry.file)
+            self._toast(f"saved {entry.file}" + (" (that name was taken, so it got a counter)"
+                                                 if getattr(entry, "suffixed", False) else ""), "info", 4)
+            event(log, logging.INFO, "agent.dialog_save", uid=uid, file=entry.file,
+                  suffixed=getattr(entry, "suffixed", False))
             return None
         event(log, logging.WARNING, "agent.dialog_unknown_action", action=action)
         return None
+
+    def _live_uid(self) -> str | None:
+        return (self.control.live_recording() or {}).get("uid")
+
+    def save_preview(self, uid: str, name: str, collection: str) -> str:
+        """What Enter would save as, for the dialog's live preview line: the same
+        allocation the rename then performs (catalog.plan_rename)."""
+        choice, problem = dialog.validate_choice(name, collection)
+        if problem:
+            return problem
+        try:
+            plan = catalog.plan_rename(self.cfg.root_path(), uid, choice.name, choice.collection)
+        except (OSError, LookupError, naming.NamingError, ValueError) as exc:
+            return f"cannot save: {exc}"
+        return dialog.preview_text(plan)
 
     # -- discard ----------------------------------------------------------------------
 
     def _discard(self, uid: str, reason: str) -> str | None:
         try:
-            entry = catalog.discard(self.cfg.root_path(), uid, reason)
+            entry = catalog.discard(self.cfg.root_path(), uid, reason, live_uid=self._live_uid())
         except (OSError, LookupError) as exc:
             event(log, logging.ERROR, "agent.discard_failed", uid=uid, error=repr(exc))
             message = f"could not discard: {exc}"
@@ -470,20 +522,27 @@ class Agent:
             status = info.get("status") or "recording"
             if self.session is not None and self.session.stop_kind is not None:
                 status = "stopping"
+            if status not in PILL_STATES:
+                status = "recording"
+            captured = info.get("captured_s") if isinstance(info.get("captured_s"), (int, float)) else 0.0
             since = _parse_iso(info.get("recording_since"))
-            elapsed = (self.now() - since).total_seconds() if since else None
-            self._show_pill(status if status in ("starting", "recording", "stopping") else "recording", elapsed)
+            if status == "recording" and since:
+                elapsed = captured + (self.now() - since).total_seconds()
+            else:
+                elapsed = captured
+            self._show_pill(status, elapsed, int(info.get("takes") or 0), bool(info.get("take_open")))
         elif self.session is not None:
             self._show_pill("stopping" if self.session.stop_kind else "starting", None)
         else:
             self._show_pill(None, None)
 
-    def _show_pill(self, status: str | None, elapsed: float | None) -> None:
+    def _show_pill(self, status: str | None, elapsed: float | None, takes: int = 0, take_open: bool = False) -> None:
         ag = self.cfg.agent
         if status is None or not ag.pill or self.pill_problem:
             self.ui.pill(None)
             return
-        if not self.ui.pill(pill_text(status, elapsed), COLORS[status], ag.pill_position, ag.pill_margin_px):
+        if not self.ui.pill(pill_text(status, elapsed, takes, take_open), COLORS[status], ag.pill_position,
+                            ag.pill_margin_px):
             self._pill_failed()
 
     def _pill_failed(self) -> None:

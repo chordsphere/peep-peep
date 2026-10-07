@@ -97,6 +97,15 @@ class FlashConfig:
     duration_ms: int = 200               # 150 measured 4-5 frames at 30 fps; 200 for margin (smoke test, 2026-10-04)
     settle_ms: int = 400                 # keep recording this long after the stop flash before sending q
     lead_ms: int = 300                   # wait after ffmpeg reports ready before the start flash
+    # Session C1a: take, retake and mark show a corner patch (captured, for C1b to find)
+    # instead of a full-screen strobe. Session/segment start and stop keep the full flash.
+    take_open_color: str = "#0000FF"     # blue: a take opens
+    take_close_color: str = "#FF0000"    # red: a take closes
+    retake_color: str = "#FFFF00"        # yellow: the last take is discarded and a fresh one opens
+    mark_style: str = "patch"            # patch (corner, mark_color) | full (B's full-screen cyan flash)
+    patch_size_px: int = 200             # side of the square patch, physical pixels
+    patch_corner: str = "auto"           # auto = the corner opposite the pill | top-left | top-right | bottom-left | bottom-right
+    patch_margin_px: int = 0             # distance from the screen edges
 
 
 @dataclass(frozen=True)
@@ -118,6 +127,11 @@ class AgentConfig:
     record_hotkey: str = "Ctrl+Alt+R"    # start a recording / stop it (then the naming dialog)
     mark_hotkey: str = "Ctrl+Alt+M"      # drop a mark (cyan flash + sidecar entry) while recording
     discard_hotkey: str = "Ctrl+Alt+X"   # stop and delete the current take
+    # Session C1a (the probe found all three free on the laptop, 2026-10-07):
+    pause_hotkey: str = "Ctrl+Alt+P"     # hard pause / resume: capture stops; resume opens the next segment
+    take_hotkey: str = "Ctrl+Alt+T"      # open a take / close it (only takes survive C1b's render)
+    retake_hotkey: str = "Ctrl+Alt+Backspace"   # discard the most recent take, open a fresh one now
+    debounce_ms: int = 1000              # a second press of the same chord within this is ignored (and logged)
     hotkey_retry_s: int = 60             # keep retrying chords that failed to register (login race)
     dialog: bool = True                  # false: hotkey stops keep the automatic name, no dialog
     pill: bool = True                    # the REC pill (excluded from capture; probe-verified 2026-10-05)
@@ -171,6 +185,11 @@ class ConfigError(ValueError):
 _SECTIONS = {"video": VideoConfig, "audio": AudioConfig, "flash": FlashConfig,
              "output": OutputConfig, "ffmpeg": FfmpegConfig, "agent": AgentConfig}
 PILL_POSITIONS = ("top-right", "top-left", "top-center", "bottom-right", "bottom-left", "bottom-center")
+PATCH_CORNERS = ("auto", "top-left", "top-right", "bottom-left", "bottom-right")
+MARK_STYLES = ("patch", "full")
+FIDUCIAL_COLOR_KEYS = ("start_color", "stop_color", "mark_color", "take_open_color", "take_close_color",
+                       "retake_color")
+MIN_COLOR_DISTANCE = 96       # some channel must differ by this much, so C1b cannot confuse two fiducials
 _TOP_KEYS = {"root": str, "default_collection": str, "log_level": str}
 
 
@@ -234,15 +253,7 @@ def validate(cfg: Config) -> None:
     parse_scale(v.scale)
     if v.gop_seconds < 1:
         raise ConfigError("video.gop_seconds must be >= 1")
-    for name in ("start_color", "stop_color", "mark_color"):
-        if not _HEX_COLOR.match(getattr(f, name)):
-            raise ConfigError(f"flash.{name} must be #RRGGBB, got {getattr(f, name)!r}")
-    colors = [f.start_color.upper(), f.stop_color.upper(), f.mark_color.upper()]
-    if len(set(colors)) != 3:
-        raise ConfigError(f"flash start/stop/mark colours must all differ (session C tells them apart), "
-                          f"got {', '.join(colors)}")
-    if not 20 <= f.duration_ms <= 2000:
-        raise ConfigError(f"flash.duration_ms must be 20..2000, got {f.duration_ms}")
+    validate_flash(f)
     validate_audio(a)
     if cfg.output.container not in CONTAINERS:
         raise ConfigError(f"output.container must be one of {CONTAINERS}, got {cfg.output.container!r}")
@@ -251,6 +262,33 @@ def validate(cfg: Config) -> None:
     if cfg.log_level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR"):
         raise ConfigError(f"log_level must be DEBUG/INFO/WARNING/ERROR, got {cfg.log_level!r}")
     validate_agent(cfg.agent)
+
+
+def _rgb(color: str) -> tuple[int, int, int]:
+    return int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+
+
+def validate_flash(f: FlashConfig) -> None:
+    for name in FIDUCIAL_COLOR_KEYS:
+        if not _HEX_COLOR.match(getattr(f, name)):
+            raise ConfigError(f"flash.{name} must be #RRGGBB, got {getattr(f, name)!r}")
+    colors = [(name, getattr(f, name).upper()) for name in FIDUCIAL_COLOR_KEYS]
+    for i, (n1, c1) in enumerate(colors):
+        for n2, c2 in colors[i + 1:]:
+            if max(abs(a - b) for a, b in zip(_rgb(c1), _rgb(c2))) < MIN_COLOR_DISTANCE:
+                raise ConfigError(f"flash.{n1} {c1} and flash.{n2} {c2} are too alike: every fiducial colour must "
+                                  f"differ from the others by at least {MIN_COLOR_DISTANCE} in some channel "
+                                  f"(session C tells them apart by colour)")
+    if not 20 <= f.duration_ms <= 2000:
+        raise ConfigError(f"flash.duration_ms must be 20..2000, got {f.duration_ms}")
+    if f.mark_style not in MARK_STYLES:
+        raise ConfigError(f"flash.mark_style must be one of {MARK_STYLES}, got {f.mark_style!r}")
+    if f.patch_corner not in PATCH_CORNERS:
+        raise ConfigError(f"flash.patch_corner must be one of {PATCH_CORNERS}, got {f.patch_corner!r}")
+    if not 32 <= f.patch_size_px <= 1600:
+        raise ConfigError(f"flash.patch_size_px must be 32..1600, got {f.patch_size_px}")
+    if not 0 <= f.patch_margin_px <= 1000:
+        raise ConfigError(f"flash.patch_margin_px must be 0..1000, got {f.patch_margin_px}")
 
 
 def validate_audio(a: AudioConfig) -> None:
@@ -307,6 +345,8 @@ def validate_agent(ag: AgentConfig) -> None:
         raise ConfigError(f"agent.pill_margin_px must be 0..1000, got {ag.pill_margin_px}")
     if not 0 <= ag.hotkey_retry_s <= 3600:
         raise ConfigError(f"agent.hotkey_retry_s must be 0..3600, got {ag.hotkey_retry_s}")
+    if not 0 <= ag.debounce_ms <= 10000:
+        raise ConfigError(f"agent.debounce_ms must be 0..10000, got {ag.debounce_ms}")
 
 
 def load(path: Path | None = None, environ: dict[str, str] | None = None) -> Config:
@@ -376,6 +416,13 @@ TEMPLATE = '''\
 # duration_ms = 200
 # settle_ms = 400
 # lead_ms = 300
+# take_open_color = "#0000FF"     # corner patch when a take opens (all fiducial colours must differ)
+# take_close_color = "#FF0000"    # ... when a take closes
+# retake_color = "#FFFF00"        # ... on a retake
+# mark_style = "patch"            # patch: marks show a corner patch | full: the full-screen flash
+# patch_size_px = 200             # the patch's side, physical pixels
+# patch_corner = "auto"           # auto (opposite the pill) | top-left | top-right | bottom-left | bottom-right
+# patch_margin_px = 0
 
 [output]
 # container = "mp4"               # mp4 | mkv
@@ -389,6 +436,10 @@ TEMPLATE = '''\
 # record_hotkey = "Ctrl+Alt+R"    # start / stop (then the naming dialog)
 # mark_hotkey = "Ctrl+Alt+M"      # drop a mark while recording
 # discard_hotkey = "Ctrl+Alt+X"   # stop and delete the take
+# pause_hotkey = "Ctrl+Alt+P"     # hard pause / resume (capture stops; resume opens the next segment)
+# take_hotkey = "Ctrl+Alt+T"      # open / close a take
+# retake_hotkey = "Ctrl+Alt+Backspace"   # discard the last take, open a fresh one
+# debounce_ms = 1000              # a repeat of the same chord within this is ignored
 # hotkey_retry_s = 60             # keep retrying a chord another app holds, for this long after start
 # dialog = true                   # false: hotkey stops keep the automatic name
 # pill = true                     # the REC pill (hidden from the recording itself)

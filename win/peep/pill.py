@@ -37,7 +37,9 @@ log = logging.getLogger("peep.pill")
 # ---------------------------------------------------------------------------
 
 COLORS = {"recording": "#C62828", "starting": "#6D4C41", "stopping": "#455A64",
-          "info": "#263238", "warning": "#8D6E00", "error": "#B71C1C"}
+          "info": "#263238", "warning": "#8D6E00", "error": "#B71C1C",
+          # Session C1a: a hard pause must be unmistakable at a glance, so it is not red.
+          "paused": "#E65100", "pausing": "#455A64", "resuming": "#6D4C41"}
 
 
 def format_elapsed(seconds: float | None) -> str:
@@ -48,9 +50,28 @@ def format_elapsed(seconds: float | None) -> str:
     return f"{h}:{m:02d}:{sec:02d}" if h else f"{m:02d}:{sec:02d}"
 
 
-def pill_text(state: str, elapsed_s: float | None) -> str:
+def take_text(takes: int, take_open: bool) -> str:
+    """'' with no take yet; '◉ take 3' while take 3 is open; '○ 3 takes' between takes."""
+    if take_open:
+        return f"◉ take {takes}"
+    if takes:
+        return f"○ {takes} take{'s' if takes != 1 else ''}"
+    return ""
+
+
+def pill_text(state: str, elapsed_s: float | None, takes: int = 0, take_open: bool = False) -> str:
+    """The pill's text. `elapsed_s` is the time captured so far (the segments before
+    a pause plus the current one), so it stands still while paused."""
+    t = take_text(takes, take_open)
+    tail = f"  {t}" if t else ""
     if state == "recording":
-        return f"● {format_elapsed(elapsed_s)}"
+        return f"● {format_elapsed(elapsed_s)}{tail}"
+    if state == "paused":
+        return f"❚❚ PAUSED  {format_elapsed(elapsed_s)}{tail}"
+    if state == "pausing":
+        return "❚❚ pausing…"
+    if state == "resuming":
+        return "● resuming…"
     if state == "starting":
         return "● starting…"
     if state == "stopping":

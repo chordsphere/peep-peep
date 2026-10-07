@@ -183,6 +183,15 @@ class MarshalledFlasher:
             event(log, logging.ERROR, "flash.marshal_failed", color=color, error=repr(exc))
             return NullFlasher().flash(color, duration_ms)
 
+    def patch(self, color: str, duration_ms: int, corner: str, size_px: int, margin_px: int = 0) -> FlashRecord:
+        """Session C1a's corner patch, on the UI thread like the flash."""
+        try:
+            return self.dispatcher.call(self.shared.patch, color, duration_ms, corner, size_px, margin_px,
+                                        timeout_s=self.timeout_s)
+        except Exception as exc:
+            event(log, logging.ERROR, "flash.marshal_failed", color=color, style="patch", error=repr(exc))
+            return NullFlasher().patch(color, duration_ms, corner, size_px, margin_px)
+
     def close(self) -> None:
         pass
 

@@ -35,7 +35,8 @@ class ChordTest(unittest.TestCase):
     def test_table_and_conflicts(self):
         table = hk.table_from_agent_config(c.AgentConfig())
         self.assertEqual({a: ch.text for a, ch in table.items()},
-                         {"record": "Ctrl+Alt+R", "mark": "Ctrl+Alt+M", "discard": "Ctrl+Alt+X"})
+                         {"record": "Ctrl+Alt+R", "mark": "Ctrl+Alt+M", "discard": "Ctrl+Alt+X",
+                          "pause": "Ctrl+Alt+P", "take": "Ctrl+Alt+T", "retake": "Ctrl+Alt+Backspace"})
         with self.assertRaisesRegex(hk.HotkeyError, re.escape("mark_hotkey and record_hotkey are both Ctrl+Alt+R")):
             hk.build_table({"record": "Ctrl+Alt+R", "mark": "alt+ctrl+r"})
         with self.assertRaisesRegex(hk.HotkeyError, "unknown hotkey action"):
@@ -112,7 +113,8 @@ class ListenerTest(unittest.TestCase):
     def test_registers_dispatches_and_unregisters(self):
         lst, api, fg = self.make()
         lst.start()
-        self.assertEqual(sorted(api.registered.values()), ["Ctrl+Alt+M", "Ctrl+Alt+R", "Ctrl+Alt+X"])
+        self.assertEqual(sorted(api.registered.values()), ["Ctrl+Alt+Backspace", "Ctrl+Alt+M", "Ctrl+Alt+P",
+                                                           "Ctrl+Alt+R", "Ctrl+Alt+T", "Ctrl+Alt+X"])
         api.messages.put(("hotkey", self.ident(lst, "record")))
         api.messages.put(("hotkey", self.ident(lst, "mark")))
         api.messages.put(("hotkey", 0x1234))                 # not ours: logged, ignored

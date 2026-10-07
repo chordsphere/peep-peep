@@ -8,38 +8,45 @@ and stderr tail on failure.
 
 `Recorder.record()` is the whole recording, start to catalog:
 
-  name    foreground window -> slug (unless given) -> collision-free stem
-  claim   sidecar written at once (status "recording", reserves the stem),
-          control file claimed so `peep stop` can find us
-  audio   (A.1) one WASAPI capture child per audio source (system, mic),
-          each serving raw PCM on a localhost port; a child that cannot
-          start is reported loudly and the recording goes on without it
-  start   ffmpeg launched into <stem>.recording.mkv; if the pipeline dies
-          during start-up, the next one in video.fallback is tried, loudly.
-          The moment ffmpeg prints `Input #0` (its first ddagrab frame is
-          VIDEO_EPOCH before that, measured), every child is sent that
-          instant as its anchor, and its stream starts there: audio t=0 and
-          video t=0 are the same moment
-  flash   start flash once ffmpeg reports its output open (+ lead_ms), with
-          the clap tone when system audio is recorded
-  wait    until stop_event (q/Enter in the terminal, or the agent's hotkey), a
-          stop-request file (`peep stop`), or ffmpeg exiting on its own (a
-          failure); meanwhile mark requests (`peep mark`, the agent's mark
-          hotkey) flash the mark colour and land in the sidecar's `marks`
-  stop    stop flash, settle_ms, then `q`; escalate to terminate on timeout;
-          then the audio children (they keep feeding ffmpeg until it exits,
-          and ffmpeg's -rw_timeout bounds a hung one: no hang on the stop path)
-  final   remux to <stem>.mp4 (streams copied) and drop the capture, or
-          keep the Matroska; sidecar completed; catalog event appended
+  name    foreground window -> slug (unless given) -> collision-free stem,
+          free in the folder (case-insensitively) and in the catalog (C1a)
+  claim   sidecar created exclusively at once (status "recording", reserves
+          the stem), control file claimed so `peep stop` can find us
+  segment one or more (session C1a: hard pause / resume), each:
+    audio   (A.1) one WASAPI capture child per audio source, each serving raw
+            PCM on a localhost port; a child that cannot start is reported
+            loudly and the segment goes on without it
+    start   ffmpeg launched into <stem>.recording.mkv (segment k >= 2:
+            <stem>.seg<k>.recording.mkv); if the pipeline dies during
+            start-up, the next one in video.fallback is tried, loudly. At
+            ffmpeg's `Input #0` (its first ddagrab frame is VIDEO_EPOCH
+            before that, measured), every child is sent that instant as its
+            anchor: audio t=0 and video t=0 are the same moment
+    flash   start flash once ffmpeg reports its output open (+ lead_ms), with
+            the clap tone when system audio is recorded
+    wait    until stop_event (q/Enter in the terminal, or the agent's hotkey), a
+            stop-request file (`peep stop`), ffmpeg exiting on its own (a
+            failure), or an accepted pause. Meanwhile requests (`peep mark|take|
+            retake|pause`, the agent's chords) go through the event model
+            (events.py) and show a corner patch (C1a) or the mark flash
+    stop    stop flash, settle_ms, then `q`; escalate to terminate on timeout;
+            then the audio children (they keep feeding ffmpeg until it exits,
+            and ffmpeg's -rw_timeout bounds a hung one: no hang on the stop path)
+    final   remux to <stem>.mp4 / <stem>.seg<k>.mp4 (streams copied) and drop
+            the capture, or keep the Matroska
+  pause   between segments nothing is captured; the sidecar and the catalog
+          already hold the finished segments, so a crash while paused keeps
+          them. Requests still count (placed at the boundary).
+  final   sidecar completed (the event record, takes, summary); catalog event
 
 Matroska is the capture container because a capture cut short by a
 crash or power loss is still playable; MP4 is only produced from a
 cleanly closed capture.
 
 Sections:
-  1. FfmpegProcess              (~line 73)
-  2. Request / result           (~line 231)
-  3. Recorder                   (~line 268)
+  1. FfmpegProcess              (~line 85)
+  2. Request / result           (~line 245)
+  3. Recorder                   (~line 290)
 """
 
 from __future__ import annotations
@@ -59,7 +66,9 @@ from typing import Callable
 
 from . import catalog, ffmpeg_cmd, naming, paths
 from .config import Config, effective_sources, source_set
-from .flash import FlashRecord, NullFlasher
+from .events import MARK, RETAKE, TAKE, EventModel, Press
+from .events import summary_line as events_summary_line
+from .flash import NullFlasher, patch_corner
 from .logsetup import event
 from .winapi import ForegroundInfo
 
@@ -258,7 +267,12 @@ class RecordResult:
     sidecar_path: Path | None = None
     exit_code: int | None = None
     stderr_tail: list[str] = field(default_factory=list)
-    duration_s: float | None = None
+    duration_s: float | None = None          # the whole session: every segment's duration added up
+    # Session C1a: what the dialog's status line needs, computed from the event record.
+    segments: int = 1
+    summary: dict | None = None              # events.summarize(): takes, kept_s, total_s, whole, kept
+    size_bytes: int | None = None            # every segment's file together
+    suffixed_from: str | None = None         # the stem that was wanted, when a counter was added
 
 
 class RecordError(RuntimeError):
@@ -351,10 +365,13 @@ class Recorder:
         collection = naming.validate_collection(req.collection or cfg.default_collection)
         fg = req.foreground if req.foreground is not None else self.foreground()
         slug = naming.slug_from_user(req.slug) if req.slug else naming.suggest_slug(fg.image, fg.title)
-        coll_dir = cfg.root_path() / collection
+        root = cfg.root_path()
+        coll_dir = root / collection
         coll_dir.mkdir(parents=True, exist_ok=True)
-        stem = naming.allocate_stem(str(coll_dir), self.today(), slug)
-        capture = coll_dir / f"{stem}.recording.mkv"
+        today = self.today()
+        stem = naming.allocate_stem(str(coll_dir), today, slug, reserved=self._catalog_stems(root, collection))
+        wanted_stem = naming.stem_for(today, slug)
+        capture = coll_dir / f"{stem}{naming.segment_suffix(1, 'capture')}"
         final = coll_dir / f"{stem}.{cfg.output.container}"
         side = coll_dir / f"{stem}.json"
         use_flash = cfg.flash.enabled if req.flash is None else req.flash
@@ -368,81 +385,187 @@ class Recorder:
         sc["audio"] = self._audio_block(sources) if wanted else None
         sc["flash"]["enabled"] = use_flash
         sc["timeline"]["origin"] = req.origin
+        if stem != wanted_stem:
+            sc["name_suffixed_from"] = wanted_stem
 
         # Claim before writing anything: a refused claim (already recording) must leave no trace.
         self.control.claim({"uid": uid, "capture": str(capture), "final": str(final), "sidecar": str(side),
-                            "origin": req.origin, "status": "starting"})
-        proc: FfmpegProcess | None = None
-        flasher = NullFlasher()
-        captures: dict = {}
+                            "origin": req.origin, "status": "starting", "segment": 1, "captured_s": 0.0,
+                            "takes": 0, "take_open": False})
+        sess = _Session(req=req, sc=sc, side=side, stem=stem, coll_dir=coll_dir, uid=uid, collection=collection,
+                        use_flash=use_flash, sources=sources, wanted=wanted, ffmpeg=ffmpeg, final=final,
+                        model=EventModel(cfg.agent.debounce_ms / 1000))
         try:
-            catalog.write_sidecar(side, sc)   # reserves the stem while the capture runs
+            try:
+                catalog.create_json_exclusive(side, sc)    # reserves the stem; never overwrites a sidecar
+            except FileExistsError as exc:
+                raise RecordError(f"{side.name} appeared while this recording was being named; "
+                                  f"nothing was overwritten, try again") from exc
+            sess.own_side = True
             event(log, logging.INFO, "record.begin", uid=uid, stem=stem, collection=collection,
-                  slug_source="user" if req.slug else "foreground", fg_process=fg.process)
+                  slug_source="user" if req.slug else "foreground", fg_process=fg.process,
+                  **({"suffixed_from": wanted_stem} if stem != wanted_stem else {}))
             if use_flash:
-                flasher = self._prepare_flasher(sc)
-            captures = self._start_audio(wanted, sc)
-            proc, pipeline, spec = self._start_capture(ffmpeg, capture, req, wanted, captures, sc)
-            if proc is None:
-                return self._finish_failed_start(sc, side, capture, uid, collection, spec)
-            t0 = proc.started_mono
-            timeline = sc["timeline"]
-            timeline["ffmpeg_started_at"] = proc.started_at
-            timeline["ffmpeg_ready_s"] = round(time.monotonic() - t0, 3)
-            self.sleep(cfg.flash.lead_ms / 1000)
-            if use_flash:
-                if "system" in captures and cfg.audio.clap:
-                    self._clap(sc, proc)
-                rec = flasher.flash(cfg.flash.start_color, cfg.flash.duration_ms)
-                sc["flash"]["start"] = rec.to_sidecar(t0)
-            self.control.update_active(status="recording", recording_since=catalog.now_iso(),
-                                       ffmpeg_started_at=proc.started_at)
-            self.status(f"● recording → {final}\n  {audio_summary(sc.get('audio'))}\n"
-                        f"  press q or Enter to stop (or run `peep stop` elsewhere)")
-
-            def take_marks():
-                self._take_marks(flasher if use_flash else None, sc, side, t0, proc.started_at)
-
-            reason = self._wait_for_stop(proc, stop_event, on_tick=take_marks)
-            if reason != "ffmpeg-exited":
-                take_marks()              # a mark pressed just before the stop still counts
-            self.control.update_active(status="stopping")
-            timeline["stop_requested_at"] = catalog.now_iso()
-            timeline["stop_requested_s"] = round(time.monotonic() - t0, 3)
-            timeline["stop_reason"] = reason
-            rc = proc.poll()
-            if reason != "ffmpeg-exited":
-                if use_flash:
-                    rec = flasher.flash(cfg.flash.stop_color, cfg.flash.duration_ms)
-                    sc["flash"]["stop"] = rec.to_sidecar(t0)
-                self.sleep(cfg.flash.settle_ms / 1000)
-                self.status("■ stopping…")
-                proc.send_quit()
-                rc = proc.wait(cfg.ffmpeg.stop_timeout_s)
-                if rc is None:
-                    rc = proc.terminate(f"no exit {cfg.ffmpeg.stop_timeout_s}s after q")
-            else:
-                proc.join_reader()
-            timeline["ffmpeg_exited_at"] = catalog.now_iso()
-            timeline["ffmpeg_exited_s"] = round(time.monotonic() - t0, 3)
-            event(log, logging.INFO if rc == 0 else logging.ERROR, "ffmpeg.exit", pid=proc.proc.pid,
-                  exit_code=rc, reason=reason)
-            self._stop_audio(captures, sc)
-            return self._finalize(sc, side, capture, final, proc, rc, ffmpeg, spec, uid, collection, reason)
+                sess.flasher = self._prepare_flasher(sc)
+            index = 1
+            while True:
+                outcome = self._run_segment(sess, index, stop_event)
+                if outcome == "failed-start":
+                    if index == 1:
+                        return self._finish_failed_start(sc, side, capture, uid, collection, None)
+                    self.status(f"! segment {index} could not start (see the ffmpeg lines above); the recording "
+                                f"was saved with the {index - 1} segment(s) captured before the pause")
+                    sess.reason = sess.reason or "resume-failed"
+                    break
+                if outcome != "pause":
+                    break
+                after = self._pause_wait(sess, index, stop_event)
+                if after != "resume":
+                    sess.reason = after
+                    break
+                index += 1
+            return self._finalize_session(sess)
         except BaseException as exc:
             # Anything unexpected (including Ctrl-C reaching this process): never leave a
             # sidecar claiming "recording". The capture file, if any, is left where it is.
             event(log, logging.ERROR, "record.aborted", uid=uid, error=repr(exc))
-            if sc.get("status") == "recording":
+            if sc.get("status") in ("recording", "paused") and sess.own_side:
                 sc["status"] = "failed"
                 sc["error"] = repr(exc)
+                self._sync_events(sess)
                 try:
                     catalog.write_sidecar(side, sc)
                 except OSError as write_exc:
                     event(log, logging.ERROR, "sidecar.write_failed", path=str(side), error=repr(write_exc))
             raise
         finally:
-            flasher.close()
+            sess.flasher.close()
+            self.control.release()
+
+    def _catalog_stems(self, root: Path, collection: str) -> set[str]:
+        """The catalog's stems in this collection (the naming audit reserves them
+        even when their files are gone). An unreadable catalog is logged, and the
+        folder listing alone decides."""
+        try:
+            return catalog.Catalog(root).stems_in(collection)
+        except OSError as exc:
+            event(log, logging.WARNING, "catalog.unreadable_for_naming", root=str(root), error=repr(exc))
+            return set()
+
+    # -- one segment ---------------------------------------------------------------
+
+    def _segment_context(self, sess: "_Session", index: int) -> dict:
+        """The blocks a segment fills (video, audio, flash, timeline, ffmpeg). Segment 1
+        fills the sidecar's own top-level blocks, so a recording that is never paused
+        has exactly A/A.1/B's sidecar; later segments get fresh blocks of the same shape."""
+        if index == 1:
+            return sess.sc
+        return {"video": {k: None for k in sess.sc["video"]},
+                "audio": self._audio_block(sess.sources) if sess.wanted else None,
+                "flash": {"enabled": sess.sc["flash"]["enabled"], "start": None, "stop": None},
+                "timeline": {}, "ffmpeg": {"argv": None, "exit_code": None, "stderr_tail": None, "remux_argv": None}}
+
+    def _run_segment(self, sess: "_Session", index: int, stop_event: threading.Event) -> str:
+        """Capture one segment, start to finalized file. Returns why it ended:
+        "pause", "failed-start", or the stop reason (A's: terminal / peep-stop /
+        hotkey... / ffmpeg-exited)."""
+        cfg = self.cfg
+        segsc = self._segment_context(sess, index)
+        capture = sess.coll_dir / f"{sess.stem}{naming.segment_suffix(index, 'capture')}"
+        block = {"index": index, "capture_file": capture.name, "file": None, "status": "recording"}
+        sess.segments.append((block, segsc))
+        proc: FfmpegProcess | None = None
+        captures: dict = {}
+        try:
+            captures = self._start_audio(sess.wanted, segsc)
+            proc, pipeline, spec = self._start_capture(sess.ffmpeg, capture, sess.req, sess.wanted, captures, segsc)
+            if proc is None:
+                block["status"] = "failed-start"
+                self._stop_audio(captures, segsc)
+                return "failed-start"
+            t0 = proc.started_mono
+            timeline = segsc["timeline"]
+            timeline["ffmpeg_started_at"] = proc.started_at
+            timeline["ffmpeg_ready_s"] = round(time.monotonic() - t0, 3)
+            self.sleep(cfg.flash.lead_ms / 1000)
+            if sess.use_flash:
+                if "system" in captures and cfg.audio.clap:
+                    self._clap(segsc, proc)
+                rec = sess.flasher.flash(cfg.flash.start_color, cfg.flash.duration_ms)
+                segsc["flash"]["start"] = rec.to_sidecar(t0)
+            epoch = (proc.input0_qpc - cfg.audio.epoch_lead_ms / 1000) if proc.input0_qpc is not None \
+                else proc.started_qpc
+            sess.model.segment_started(index, epoch, proc.started_qpc)
+            sess.model.set_paused(False)
+            if index > 1:
+                prev = sess.model.segments.get(index - 1) or {}
+                sess.model.note_pause_capture(index - 1, prev.get("end_qpc"), epoch)
+            sess.live = _Live(index=index, segsc=segsc, t0=t0, started_at=proc.started_at, proc=proc)
+            block.update(started_at=proc.started_at, ffmpeg_started_qpc=proc.started_qpc,
+                         input0_qpc=proc.input0_qpc, video_epoch_qpc_est=round(epoch, 6))
+            self.control.update_active(status="recording", recording_since=catalog.now_iso(),
+                                       ffmpeg_started_at=proc.started_at, segment=index,
+                                       captured_s=round(sess.captured_s, 3), paused_since=None,
+                                       **self._take_counts(sess))
+            if index == 1:
+                note = (f"\n  ({sess.sc['name_suffixed_from']} was taken, so this one is {sess.stem})"
+                        if sess.sc.get("name_suffixed_from") else "")
+                self.status(f"● recording → {sess.final}{note}\n  {audio_summary(segsc.get('audio'))}\n"
+                            f"  press q or Enter to stop (or run `peep stop` elsewhere)")
+            else:
+                self.status(f"● recording again: segment {index} → "
+                            f"{sess.coll_dir / (sess.stem + naming.segment_suffix(index, 'mp4'))}")
+            # Requests that arrived during the pause or the resume are placed by their own stamps.
+            pending, sess.pending = sess.pending, []
+            reason = self._handle_requests(sess, pending) if pending else None
+            if reason is None:
+                reason = self._wait_for_stop(proc, stop_event, on_tick=lambda: self._sweep(sess))
+            if reason != "ffmpeg-exited":
+                self._sweep(sess)          # a press just before the stop still counts
+                if reason != "pause" and sess.pause_requested:
+                    sess.pause_requested = False      # a stop wins over a pause pressed at the same moment
+                    sess.model.cancel_pending_pause("superseded-by-stop")
+            pausing = reason == "pause"
+            self.control.update_active(status="pausing" if pausing else "stopping")
+            timeline["stop_requested_at"] = catalog.now_iso()
+            timeline["stop_requested_s"] = round(time.monotonic() - t0, 3)
+            timeline["stop_reason"] = reason
+            rc = proc.poll()
+            stopped_qpc = None
+            if reason != "ffmpeg-exited":
+                if sess.use_flash:
+                    rec = sess.flasher.flash(cfg.flash.stop_color, cfg.flash.duration_ms)
+                    segsc["flash"]["stop"] = rec.to_sidecar(t0)
+                self.sleep(cfg.flash.settle_ms / 1000)
+                self.status("❚❚ pausing…" if pausing else "■ stopping…")
+                stopped_qpc = time.perf_counter()
+                proc.send_quit()
+                rc = proc.wait(cfg.ffmpeg.stop_timeout_s)
+                if rc is None:
+                    rc = proc.terminate(f"no exit {cfg.ffmpeg.stop_timeout_s}s after q")
+            else:
+                proc.join_reader()
+                stopped_qpc = time.perf_counter()
+            sess.live = None
+            timeline["ffmpeg_exited_at"] = catalog.now_iso()
+            timeline["ffmpeg_exited_s"] = round(time.monotonic() - t0, 3)
+            event(log, logging.INFO if rc == 0 else logging.ERROR, "ffmpeg.exit", pid=proc.proc.pid,
+                  exit_code=rc, reason=reason, segment=index)
+            self._stop_audio(captures, segsc)
+            captures = {}
+            self._finalize_segment(sess, block, segsc, capture, proc, rc, spec)
+            sess.model.segment_ended(index, stopped_qpc, block.get("duration_s"))
+            sess.captured_s += block.get("duration_s") or 0.0
+            if pausing and block["status"] == "ok":
+                return "pause"
+            if pausing:
+                self.status(f"! segment {index} did not finish cleanly; ending the recording instead of pausing")
+                sess.reason = "ffmpeg-exited"
+                sess.model.cancel_pending_pause("segment-failed")
+                return "ffmpeg-exited"
+            sess.reason = reason
+            return reason
+        finally:
             if proc is not None:
                 if proc.poll() is None:
                     proc.terminate("recorder exiting with ffmpeg still running")
@@ -450,7 +573,178 @@ class Recorder:
             for cap in captures.values():      # no-op when _stop_audio already ran
                 if cap.poll() is None:
                     cap.stop(2.0)
-            self.control.release()
+
+    # -- pause ---------------------------------------------------------------------
+
+    def _pause_wait(self, sess: "_Session", index: int, stop_event: threading.Event, poll_s: float = 0.1) -> str:
+        """Hard pause: nothing is captured. The finished segments are already on disk,
+        and are catalogued now, so a crash or a power cut while paused keeps them.
+        Returns "resume", or the stop reason (q / `peep stop` / a hotkey stop)."""
+        sess.model.set_paused(True)
+        sess.pause_requested = False
+        sess.sc["status"] = "paused"
+        sess.sc["duration_s"] = round(sess.captured_s, 3)
+        self._persist(sess)
+        try:
+            self._catalog_session(sess, in_progress=True)
+        except OSError as exc:      # the sidecar still lists the segments; the final event comes at the stop
+            event(log, logging.ERROR, "catalog.pause_append_failed", error=repr(exc))
+            self.status(f"! could not catalogue the paused recording yet ({exc}); it will be at the stop")
+        self.control.update_active(status="paused", paused_since=catalog.now_iso(), segment=index,
+                                   captured_s=round(sess.captured_s, 3), **self._take_counts(sess))
+        event(log, logging.INFO, "record.paused", uid=sess.uid, after_segment=index,
+              captured_s=round(sess.captured_s, 3))
+        self.status(f"❚❚ paused after segment {index} ({fmt_s(sess.captured_s)} captured so far, saved). "
+                    f"Resume with the pause hotkey or `peep resume`; q or `peep stop` ends the recording.")
+        pending, sess.pending = sess.pending, []
+        while True:
+            stop = (getattr(stop_event, "reason", None) or "terminal") if stop_event.is_set() else \
+                ("peep-stop" if self.control.stop_requested() else None)
+            if stop is not None:
+                # presses that came with the stop still count (placed after the last segment)
+                sess.pending = pending + [Press.from_request(r) for r in self.control.take_requests()]
+                return stop
+            requests = pending + [Press.from_request(r) for r in self.control.take_requests()]
+            pending = []
+            for i, press in enumerate(requests):
+                rec = self._handle_press(sess, press)
+                if rec.get("action") == "resume":
+                    sess.pending = requests[i + 1:]
+                    sess.sc["status"] = "recording"
+                    event(log, logging.INFO, "record.resume", uid=sess.uid, next_segment=index + 1)
+                    self.control.update_active(status="resuming")
+                    self.status("● resuming…")
+                    return "resume"
+            stop_event.wait(poll_s)
+
+    # -- requests: take / retake / pause / resume / mark ------------------------------
+
+    def _sweep(self, sess: "_Session") -> str | None:
+        """One poll's worth of control-file requests (A's 100 ms tick); "pause" once a
+        pause was accepted, which ends the segment."""
+        reqs = self.control.take_requests()
+        if not reqs:
+            return "pause" if sess.pause_requested else None
+        return self._handle_requests(sess, [Press.from_request(r) for r in reqs])
+
+    def _handle_requests(self, sess: "_Session", presses: list) -> str | None:
+        for i, press in enumerate(presses):
+            if sess.pause_requested:          # everything after an accepted pause waits for the pause
+                sess.pending.extend(presses[i:])
+                break
+            self._handle_press(sess, press)
+        return "pause" if sess.pause_requested else None
+
+    def _handle_press(self, sess: "_Session", press: Press) -> dict:
+        """Decide one press in the event model, show its fiducial while capturing,
+        tell the user, keep the sidecar and active.json current."""
+        cfg = self.cfg
+        rec = sess.model.press(press, time.perf_counter())
+        live = sess.live
+        if not rec["accepted"]:
+            event(log, logging.INFO, "record.event_ignored", kind=press.kind, why=rec["ignored"],
+                  source=press.source, **(rec.get("debounce") or {}))
+            self.status(f"· {press.kind} ignored ({rec['ignored']})")
+            self._persist(sess)
+            return rec
+        kind, action = press.kind, rec["action"]
+        if action == "pause":
+            sess.pause_requested = True
+            event(log, logging.INFO, "record.pause_requested", segment=rec.get("segment"), source=press.source)
+            return rec
+        if action == "resume":
+            return rec
+        color = {"open": cfg.flash.take_open_color, "close": cfg.flash.take_close_color}.get(action)
+        if kind == RETAKE:
+            color = cfg.flash.retake_color
+        elif kind == MARK:
+            color = cfg.flash.mark_color
+        if live is not None and sess.use_flash:
+            full = kind == MARK and cfg.flash.mark_style == "full"
+            fid = self._fiducial(sess, color, full)
+            rec["fiducial"] = {**fid.to_sidecar(live.t0), "kind": f"{kind}-{action}" if kind == TAKE else kind}
+        if kind == MARK:
+            self._add_mark(sess, press, rec)
+        else:
+            what = {("take", "open"): f"▶ take {rec['take']}", ("take", "close"): f"■ take {rec['take']} closed"}
+            line = what.get((kind, action)) or (f"↺ retake: take {rec['discarded_take']} discarded, take {rec['take']} open"
+                                                if rec["discarded_take"] else f"↺ retake: take {rec['take']} open")
+            where = "" if rec.get("segment") else f" (paused: at the boundary after segment {rec.get('after_segment')})"
+            self.status(line + where)
+            event(log, logging.INFO, "record.event", kind=kind, action=action, take=rec["take"],
+                  discarded=rec["discarded_take"], segment=rec.get("segment"), media_s=rec.get("media_s"),
+                  source=press.source, fiducial=bool(rec["fiducial"]))
+        self._persist(sess)
+        try:
+            self.control.update_active(**self._take_counts(sess))
+        except OSError as exc:
+            event(log, logging.WARNING, "control.update_failed", error=repr(exc))
+        return rec
+
+    def _fiducial(self, sess: "_Session", color: str, full: bool):
+        """A corner patch (or, for a full-style mark, B's full-screen flash). A flasher
+        without patch support (an older stand-in) falls back to the full flash, loudly."""
+        f = self.cfg.flash
+        patch = getattr(sess.flasher, "patch", None)
+        if full or patch is None:
+            if not full:
+                event(log, logging.WARNING, "flash.patch_unsupported", flasher=type(sess.flasher).__name__)
+            return sess.flasher.flash(color, f.duration_ms)
+        corner = patch_corner(f.patch_corner, self.cfg.agent.pill_position)
+        return patch(color, f.duration_ms, corner, f.patch_size_px, f.patch_margin_px)
+
+    def _add_mark(self, sess: "_Session", press: Press, rec: dict) -> None:
+        """B's `marks` entry, plus where the mark sits on the segment timeline.
+        `t` (A's reserved key) is the press in seconds since that segment's ffmpeg
+        launch, from the requester's wall clock, so the poll delay does not shift it."""
+        live = sess.live
+        consumed = time.monotonic()
+        t = None
+        if live is not None:
+            t = _seconds_between(live.started_at, press.at)
+            if t is None:
+                t = round(consumed - live.t0, 3)
+        mark = {"t": t, "label": press.label, "since_ffmpeg_start_s": t, "at": press.at, "source": press.source,
+                "consumed_s": round(consumed - live.t0, 3) if live is not None else None, "flash": rec["fiducial"],
+                "segment": rec.get("segment"), "media_s": rec.get("media_s"), "event": rec["id"]}
+        if rec.get("segment") is None:
+            mark["after_segment"] = rec.get("after_segment")
+        sess.sc["marks"].append(mark)
+        n = len(sess.sc["marks"])
+        event(log, logging.INFO, "record.mark", n=n, t=t, source=press.source, label=press.label,
+              flashed=rec["fiducial"] is not None, segment=rec.get("segment"))
+        at = f"{t:.1f}s" if isinstance(t, (int, float)) else f"the boundary after segment {rec.get('after_segment')}"
+        self.status(f"◆ mark {n} at {at}" + (f" ({press.label})" if press.label else ""))
+
+    def _take_counts(self, sess: "_Session") -> dict:
+        c = sess.model.counts()
+        return {"takes": c["takes"], "take_open": c["open"]}
+
+    def _sync_events(self, sess: "_Session") -> None:
+        sc, m = sess.sc, sess.model
+        sc["segments"] = [self._segment_block(block, segsc) for block, segsc in sess.segments]
+        sc["events"], sc["takes"], sc["pauses"] = m.events, m.takes, m.pauses
+
+    def _persist(self, sess: "_Session") -> None:
+        """Rewrite the sidecar now, so a crash later keeps every event so far."""
+        self._sync_events(sess)
+        try:
+            catalog.write_sidecar(sess.side, sess.sc)
+        except OSError as exc:      # still in memory; it lands with the final sidecar
+            event(log, logging.WARNING, "sidecar.event_write_failed", path=str(sess.side), error=repr(exc))
+
+    def _wait_for_stop(self, proc: FfmpegProcess, stop_event: threading.Event, poll_s: float = 0.1,
+                       on_tick: Callable[[], str | None] | None = None) -> str:
+        while True:
+            if stop_event.is_set():
+                return getattr(stop_event, "reason", None) or "terminal"
+            if self.control.stop_requested():
+                return "peep-stop"
+            if proc.poll() is not None:
+                return "ffmpeg-exited"
+            if on_tick is not None and on_tick() == "pause":
+                return "pause"
+            stop_event.wait(poll_s)
 
     # -- steps ---------------------------------------------------------------
 
@@ -613,52 +907,6 @@ class Recorder:
         sc["ffmpeg"]["attempts"] = attempts
         return None, None, spec
 
-    def _wait_for_stop(self, proc: FfmpegProcess, stop_event: threading.Event, poll_s: float = 0.1,
-                       on_tick: Callable[[], None] | None = None) -> str:
-        while True:
-            if stop_event.is_set():
-                return getattr(stop_event, "reason", None) or "terminal"
-            if self.control.stop_requested():
-                return "peep-stop"
-            if proc.poll() is not None:
-                return "ffmpeg-exited"
-            if on_tick is not None:
-                on_tick()
-            stop_event.wait(poll_s)
-
-    def _take_marks(self, flasher, sc: dict, side: Path, t0: float, ffmpeg_started_at: str) -> None:
-        """Turn pending mark requests into sidecar `marks` entries.
-
-        `t` (A's reserved key) is the press, in seconds since the ffmpeg launch:
-        the requester's wall-clock `requested_at` minus `ffmpeg_started_at`, so the
-        <=100 ms poll delay does not shift it. When flashes are on, the mark-colour
-        flash's own stamp (same clock as flash.start/stop) is kept beside it, and
-        that flash is what session C finds in the video. The sidecar is rewritten
-        straight away, so a crash later in the recording keeps its marks."""
-        requests = self.control.take_marks()
-        if not requests:
-            return
-        cfg = self.cfg
-        for req in requests:
-            consumed = time.monotonic()
-            t = _seconds_between(ffmpeg_started_at, req.get("requested_at"))
-            if t is None:
-                t = round(consumed - t0, 3)
-            mark = {"t": t, "label": str(req.get("label") or ""), "since_ffmpeg_start_s": t,
-                    "at": req.get("requested_at"), "source": req.get("source"),
-                    "consumed_s": round(consumed - t0, 3), "flash": None}
-            if flasher is not None:
-                mark["flash"] = flasher.flash(cfg.flash.mark_color, cfg.flash.duration_ms).to_sidecar(t0)
-            sc["marks"].append(mark)
-            n = len(sc["marks"])
-            event(log, logging.INFO, "record.mark", n=n, t=t, source=mark["source"], label=mark["label"],
-                  flashed=mark["flash"] is not None)
-            self.status(f"◆ mark {n} at {t:.1f}s" + (f" ({mark['label']})" if mark["label"] else ""))
-        try:
-            catalog.write_sidecar(side, sc)
-        except OSError as exc:      # the marks are still in memory and land with the final sidecar
-            event(log, logging.WARNING, "sidecar.mark_write_failed", path=str(side), error=repr(exc))
-
     def _discard_empty(self, path: Path) -> None:
         try:
             if path.exists() and path.stat().st_size == 0:
@@ -681,57 +929,140 @@ class Recorder:
                                    "`peep doctor`, and the log", uid=uid, sidecar_path=None,
                             exit_code=last.get("exit_code"), stderr_tail=last.get("stderr_tail", []))
 
-    def _finalize(self, sc, side, capture, final, proc, rc, ffmpeg, spec, uid, collection, reason) -> RecordResult:
+    def _finalize_segment(self, sess: "_Session", block: dict, segsc: dict, capture: Path, proc, rc, spec) -> None:
+        """One segment's file: remux the clean capture to MP4 (A #3, now per
+        segment), or keep the Matroska when ffmpeg failed or the remux did."""
         cfg = self.cfg
-        root = cfg.root_path()
         size = proc.capture_size()
-        sc["video"]["capture_size"] = f"{size[0]}x{size[1]}" if size else None
+        segsc["video"]["capture_size"] = f"{size[0]}x{size[1]}" if size else None
         out = ffmpeg_cmd.output_size(spec, size)
-        sc["video"]["output_size"] = f"{out[0]}x{out[1]}" if out else None
+        segsc["video"]["output_size"] = f"{out[0]}x{out[1]}" if out else None
         media_t = proc.media_time_s()
-        sc["duration_s"] = media_t if media_t is not None else sc["timeline"].get("ffmpeg_exited_s")
-        sc["ffmpeg"]["exit_code"] = rc
+        block["duration_s"] = media_t if media_t is not None else segsc["timeline"].get("ffmpeg_exited_s")
+        segsc["ffmpeg"]["exit_code"] = rc
+        block["exit_code"] = rc
         has_data = capture.exists() and capture.stat().st_size > 0
         if rc != 0 or not has_data:
-            tail = proc.stderr_tail(15)
-            sc["ffmpeg"]["stderr_tail"] = tail
-            sc["status"] = "failed"
+            segsc["ffmpeg"]["stderr_tail"] = proc.stderr_tail(15)
+            block["status"] = "failed"
             media = None
             if has_data:   # keep what was captured, minus the in-progress marker; Matroska plays as-is
                 media = capture.with_name(capture.name.replace(".recording.mkv", ".mkv"))
-                os.rename(capture, media)
-                sc["video"]["container"] = "mkv"
-            sc["file"] = media.name if media else None
-            catalog.write_sidecar(side, sc)
-            catalog.Catalog(root).append({"event": "failed", "uid": uid, "collection": collection,
-                                          "file": catalog.relpath_posix(root, media) if media else "",
-                                          "title": sc["title"], "created": sc["created"],
-                                          "duration_s": sc["duration_s"], "exit_code": rc, "reason": reason})
+                catalog.move_no_clobber(capture, media)
+                segsc["video"]["container"] = "mkv"
+            block["file"] = media.name if media else None
+            return
+        index = block["index"]
+        if cfg.output.container == "mp4":
+            final = capture.with_name(sess.stem + naming.segment_suffix(index, "mp4"))
+            media = self._remux(sess.ffmpeg, capture, final, segsc)
+        else:
+            media = capture.with_name(sess.stem + naming.segment_suffix(index, "mkv"))
+            catalog.move_no_clobber(capture, media)
+        segsc["video"]["container"] = media.suffix.lstrip(".")
+        block["file"] = media.name
+        block["status"] = "ok"
+
+    def _segment_block(self, block: dict, segsc: dict) -> dict:
+        """The sidecar's `segments[i]`: identity, file, status and timing, plus that
+        segment's own flash / timeline / video / audio / ffmpeg blocks."""
+        out = dict(block)
+        out["stop_reason"] = segsc["timeline"].get("stop_reason")
+        for key in ("flash", "timeline", "video", "audio", "ffmpeg"):
+            out[key] = segsc.get(key)
+        if segsc.get("remux_error"):
+            out["remux_error"] = segsc["remux_error"]
+        return out
+
+    def _session_size(self, sess: "_Session") -> int | None:
+        total = 0
+        for block, _ in sess.segments:
+            if block.get("file"):
+                try:
+                    total += (sess.coll_dir / block["file"]).stat().st_size
+                except OSError:
+                    return None
+        return total
+
+    def _catalog_session(self, sess: "_Session", in_progress: bool = False) -> None:
+        """Append the session's catalog event: `recorded` when any segment holds
+        footage, else `failed`. Appended at each pause too (in_progress), so the
+        segments finished so far survive a crash while paused; the fold keeps the
+        last event per uid, so the final one simply replaces it."""
+        sc, root = sess.sc, self.cfg.root_path()
+        files = [b for b, _ in sess.segments if b.get("file")]
+        media = sess.coll_dir / files[0]["file"] if files else None
+        ok = any(b.get("status") == "ok" for b, _ in sess.segments)
+        rec = {"event": "recorded" if ok else "failed", "uid": sess.uid, "collection": sess.collection,
+               "file": catalog.relpath_posix(root, media) if media else "", "title": sc["title"],
+               "created": sc["created"], "duration_s": sc["duration_s"]}
+        if len(sess.segments) > 1 or in_progress:
+            rec["segments"] = len([b for b, _ in sess.segments if b.get("file")])
+        if in_progress:
+            rec["in_progress"] = "paused"
+        if not ok:
+            rec.update(exit_code=sc["ffmpeg"]["exit_code"], reason=sess.reason)
+        catalog.Catalog(root).append(rec)
+
+    def _finalize_session(self, sess: "_Session") -> RecordResult:
+        """Close the event record, complete the sidecar, catalogue the session."""
+        sc = sess.sc
+        blocks = [b for b, _ in sess.segments if b.get("status") != "failed-start"]
+        sess.segments = [(b, s) for b, s in sess.segments if b.get("status") != "failed-start"]
+        durations = [b.get("duration_s") for b in blocks]
+        sc["duration_s"] = round(sum(d for d in durations if isinstance(d, (int, float))), 3) if blocks else None
+        held, sess.pending = sess.pending, []
+        for press in held:                 # held over a pause the session never resumed from: still recorded
+            self._handle_press(sess, press)
+        sess.model.cancel_pending_pause("recording-ended")
+        summary = sess.model.finish()
+        sc["summary"] = summary
+        self._sync_events(sess)
+        ok_blocks = [b for b in blocks if b.get("status") == "ok"]
+        first_file = next((b["file"] for b in blocks if b.get("file")), None)
+        sc["file"] = first_file
+        media = sess.coll_dir / first_file if first_file else None
+        reason = sess.reason
+        if not ok_blocks:
+            sc["status"] = "failed"
+            catalog.write_sidecar(sess.side, sc)
+            self._catalog_session(sess)
+            seg1 = sess.segments[0][1] if sess.segments else sc
+            tail = (seg1.get("ffmpeg") or {}).get("stderr_tail") or []
+            rc = (seg1.get("ffmpeg") or {}).get("exit_code")
             why = "ffmpeg stopped on its own" if reason == "ffmpeg-exited" else f"ffmpeg exited {rc}"
             kept = f"; partial capture kept at {media}" if media else ""
-            return RecordResult(False, f"recording failed: {why}{kept}", uid=uid, media_path=media,
-                                sidecar_path=side, exit_code=rc, stderr_tail=tail, duration_s=sc["duration_s"])
-
-        media = capture
-        if cfg.output.container == "mp4":
-            media = self._remux(ffmpeg, capture, final, sc)
-        else:
-            os.rename(capture, final)
-            media = final
-        sc["video"]["container"] = media.suffix.lstrip(".")
-        sc["file"] = media.name
+            return RecordResult(False, f"recording failed: {why}{kept}", uid=sess.uid, media_path=media,
+                                sidecar_path=sess.side, exit_code=rc, stderr_tail=tail, duration_s=sc["duration_s"],
+                                segments=len(blocks), summary=summary)
         sc["status"] = "ok"
-        catalog.write_sidecar(side, sc)
-        catalog.Catalog(root).append({"event": "recorded", "uid": uid, "collection": collection,
-                                      "file": catalog.relpath_posix(root, media), "title": sc["title"],
-                                      "created": sc["created"], "duration_s": sc["duration_s"]})
+        if len(ok_blocks) < len(blocks):
+            sc["segment_failures"] = len(blocks) - len(ok_blocks)
+            for b in blocks:
+                if b.get("status") != "ok":
+                    kept = f"; what it captured is kept as {b['file']}" if b.get("file") else ""
+                    self.status(f"! segment {b['index']} ended badly (ffmpeg exit {b.get('exit_code')}){kept}")
+        catalog.write_sidecar(sess.side, sc)
+        self._catalog_session(sess)
         dur = f"{sc['duration_s']:.1f}s" if isinstance(sc["duration_s"], (int, float)) else "?s"
-        return RecordResult(True, f"saved {media} ({dur})", uid=uid, media_path=media, sidecar_path=side,
-                            exit_code=rc, duration_s=sc["duration_s"])
+        extra = ""
+        if len(blocks) > 1:
+            extra = f", {len(blocks)} segments: " + ", ".join(b["file"] for b in blocks if b.get("file"))
+        line = events_summary_line(summary)
+        if line and not summary.get("whole"):
+            extra += f"; {line.replace('  ·  ', ', ')}"
+        event(log, logging.INFO, "record.finished", uid=sess.uid, segments=len(blocks), takes=summary["takes"],
+              kept_s=summary["kept_s"], total_s=summary["total_s"], events=len(sc["events"]))
+        last_rc = (sess.segments[-1][1].get("ffmpeg") or {}).get("exit_code") if sess.segments else None
+        return RecordResult(True, f"saved {media} ({dur}){extra}", uid=sess.uid, media_path=media,
+                            sidecar_path=sess.side, exit_code=last_rc, duration_s=sc["duration_s"],
+                            segments=len(blocks), summary=summary, size_bytes=self._session_size(sess),
+                            suffixed_from=sc.get("name_suffixed_from"))
 
     def _remux(self, ffmpeg: str, capture: Path, final: Path, sc: dict) -> Path:
-        """Capture -> MP4. On failure the Matroska is kept (renamed to <stem>.mkv)
-        and the reason is logged, printed and stored in the sidecar."""
+        """Capture -> MP4 (`-n`: never over an existing file). On failure the Matroska
+        is kept (renamed to <stem>.mkv, or <stem>.seg<k>.mkv) and the reason is
+        logged, printed and stored in the sidecar (the segment's block)."""
         argv = ffmpeg_cmd.build_remux_argv(ffmpeg, str(capture), str(final))
         sc["ffmpeg"]["remux_argv"] = argv
         event(log, logging.INFO, "ffmpeg.argv", argv=argv, cmdline=subprocess.list2cmdline(argv), purpose="remux")
@@ -746,9 +1077,52 @@ class Recorder:
             capture.unlink()
             return final
         keep = capture.with_name(capture.name.replace(".recording.mkv", ".mkv"))
-        os.rename(capture, keep)
+        catalog.move_no_clobber(capture, keep)
         sc["remux_error"] = {"exit_code": rc, "stderr_tail": err.strip().splitlines()[-5:]}
         self.status(f"! MP4 remux failed (exit {rc}); kept the Matroska capture: {keep}")
         if final.exists() and final.stat().st_size == 0:
             final.unlink()
         return keep
+
+
+def fmt_s(seconds: float | None) -> str:
+    if not isinstance(seconds, (int, float)):
+        return "?"
+    s = int(round(seconds))
+    return f"{s // 60}:{s % 60:02d}"
+
+
+@dataclass
+class _Live:
+    """The segment being captured right now."""
+    index: int
+    segsc: dict
+    t0: float                 # time.monotonic() at its ffmpeg launch
+    started_at: str           # the same instant, ISO (marks' `t` is measured from it)
+    proc: FfmpegProcess
+
+
+@dataclass
+class _Session:
+    """One recording, across its segments (session C1a)."""
+    req: RecordRequest
+    sc: dict
+    side: Path
+    stem: str
+    coll_dir: Path
+    uid: str
+    collection: str
+    use_flash: bool
+    sources: str
+    wanted: tuple
+    ffmpeg: str
+    final: Path
+    model: EventModel
+    flasher: object = field(default_factory=NullFlasher)
+    segments: list = field(default_factory=list)      # [(block, segsc)] in order
+    live: _Live | None = None
+    pending: list = field(default_factory=list)       # presses held over a pause / resume
+    pause_requested: bool = False
+    captured_s: float = 0.0
+    reason: str | None = None
+    own_side: bool = False         # we created the sidecar (only then may the abort path rewrite it)

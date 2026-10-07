@@ -108,10 +108,10 @@ class AgentConfigTest(unittest.TestCase):
 
     def test_overrides(self):
         cfg = c.from_mapping({"agent": {"record_hotkey": "Ctrl+Shift+F9", "pill": False, "pill_position": "bottom-left",
-                                        "dialog": False, "hotkey_retry_s": 0}, "flash": {"mark_color": "#FFFF00"}})
+                                        "dialog": False, "hotkey_retry_s": 0}, "flash": {"mark_color": "#FF8000"}})
         self.assertEqual((cfg.agent.record_hotkey, cfg.agent.pill, cfg.agent.pill_position, cfg.agent.dialog),
                          ("Ctrl+Shift+F9", False, "bottom-left", False))
-        self.assertEqual(cfg.flash.mark_color, "#FFFF00")
+        self.assertEqual(cfg.flash.mark_color, "#FF8000")   # (C1a: yellow is now the retake patch)
 
     def test_invalid_agent_values(self):
         for data, why in (({"agent": {"pill_position": "middle"}}, "pill_position"),
@@ -121,7 +121,7 @@ class AgentConfigTest(unittest.TestCase):
                           ({"agent": {"tray": True}}, r"unknown key\(s\) in \[agent\]"),
                           ({"agent": {"discard_hotkey": "Ctrl+Alt+M"}}, "discard_hotkey and mark_hotkey"),
                           ({"flash": {"mark_color": "cyan"}}, "mark_color must be #RRGGBB"),
-                          ({"flash": {"mark_color": "#ff00ff"}}, "must all differ")):
+                          ({"flash": {"mark_color": "#ff00ff"}}, "too alike")):
             with self.subTest(data=data), self.assertRaisesRegex(c.ConfigError, why):
                 c.from_mapping(data)
 
