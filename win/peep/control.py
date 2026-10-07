@@ -17,6 +17,12 @@ In `paths.state_dir()`:
                    flashes, and appends each to the sidecar's `marks`. One
                    file per request, so two presses inside one poll interval
                    are two marks, not one.
+  event-<ns>-<pid>.json
+                   session C1a: one file per take / retake / pause / resume
+                   request (`peep take|retake|pause|resume`, the agent's
+                   chords), same pattern as marks. Each carries the
+                   requester's QPC stamp (`requested_qpc`), so the recorder
+                   places the press where it happened, not where it was polled.
   agent.json       the resident agent's pid and status (AgentControl)
   agent-command    `stop` or `reload`, written by `peep agent stop|reload`
 
@@ -45,6 +51,8 @@ log = logging.getLogger("peep.control")
 ACTIVE = "active.json"
 STOP = "stop-request"
 MARK_GLOB = "mark-*.json"
+EVENT_GLOB = "event-*.json"
+EVENT_KINDS = ("take", "retake", "pause", "resume", "pause-toggle")
 AGENT = "agent.json"
 AGENT_COMMAND = "agent-command"
 AGENT_COMMANDS = ("stop", "reload")
@@ -123,10 +131,39 @@ class Control:
             event(log, logging.INFO, "control.marks_consumed", count=len(out))
         return out
 
+    def take_requests(self) -> list[dict]:
+        """Consume every pending mark and event request, in press order (the
+        requester's time_ns is in each file name). Marks come back with
+        kind "mark". Unreadable requests are logged and dropped."""
+        files = list(self.dir.glob(MARK_GLOB)) + list(self.dir.glob(EVENT_GLOB))
+
+        def order(p: Path):
+            parts = p.name.split("-")
+            return (parts[1] if len(parts) > 2 else "", p.name)
+
+        out = []
+        for p in sorted(files, key=order):
+            try:
+                with p.open(encoding="utf-8") as fh:
+                    req = json.load(fh)
+                req.setdefault("kind", "mark" if p.name.startswith("mark-") else None)
+                out.append(req)
+            except (OSError, json.JSONDecodeError) as exc:
+                event(log, logging.WARNING, "control.request_unreadable", path=str(p), error=str(exc))
+            try:
+                p.unlink()
+            except OSError as exc:
+                event(log, logging.WARNING, "control.request_unlink_failed", path=str(p), error=str(exc))
+        if out:
+            event(log, logging.INFO, "control.requests_consumed", count=len(out),
+                  kinds=[r.get("kind") for r in out])
+        return out
+
     def clear_marks(self) -> None:
+        """Drop leftover mark and event requests (at claim and release)."""
         if not self.dir.exists():
             return
-        for p in self.dir.glob(MARK_GLOB):
+        for p in list(self.dir.glob(MARK_GLOB)) + list(self.dir.glob(EVENT_GLOB)):
             try:
                 p.unlink()
             except FileNotFoundError:
@@ -181,11 +218,46 @@ class Control:
         if info is None:
             raise LookupError("nothing is recording")
         self.dir.mkdir(parents=True, exist_ok=True)
-        req = {"requested_at": now_iso(), "source": source, "label": label}
+        req = {"requested_at": now_iso(), "requested_qpc": time.perf_counter(), "source": source, "label": label}
         name = f"mark-{time.time_ns():020d}-{os.getpid()}.json"
         write_json_atomic(self.dir / name, req)      # temp + replace: the poller never sees half a file
         event(log, logging.INFO, "control.mark_requested", source=source, label=label, pid=info.get("pid"))
         return req
+
+    def request_event(self, kind: str, source: str, *, qpc: float | None = None, at: str | None = None) -> dict:
+        """Ask the live recorder for a take / retake / pause / resume / pause-toggle
+        (session C1a). Raises LookupError if none is live. `qpc`/`at` are the
+        press instant when the caller stamped it earlier (the agent stamps the
+        hotkey the moment it arrives); otherwise now."""
+        if kind not in EVENT_KINDS:
+            raise ValueError(f"unknown event {kind!r} (known: {', '.join(EVENT_KINDS)})")
+        info = self.live_recording()
+        if info is None:
+            raise LookupError("nothing is recording")
+        self.dir.mkdir(parents=True, exist_ok=True)
+        req = {"kind": kind, "requested_at": at or now_iso(),
+               "requested_qpc": qpc if qpc is not None else time.perf_counter(), "source": source}
+        name = f"event-{time.time_ns():020d}-{os.getpid()}.json"
+        write_json_atomic(self.dir / name, req)
+        event(log, logging.INFO, "control.event_requested", kind=kind, source=source, pid=info.get("pid"))
+        return {**req, "pid": info.get("pid"), "file": name}
+
+    def wait_status(self, pid: int, statuses: tuple[str, ...], timeout_s: float, poll_s: float = 0.1,
+                    sleep: Callable[[float], None] = time.sleep,
+                    clock: Callable[[], float] = time.monotonic) -> dict | None:
+        """Wait until recorder `pid`'s active.json shows one of `statuses`; the info,
+        or None on timeout or when that recorder has gone (`peep pause` waits for
+        "paused", `peep resume` for "recording")."""
+        deadline = clock() + timeout_s
+        while True:
+            info = self.read_active()
+            if info is None or int(info.get("pid", 0)) != pid or not self.pid_alive(pid):
+                return None
+            if info.get("status") in statuses:
+                return info
+            if clock() >= deadline:
+                return None
+            sleep(poll_s)
 
     def wait_finished(self, pid: int, timeout_s: float, poll_s: float = 0.2,
                       sleep: Callable[[float], None] = time.sleep,

@@ -2,7 +2,8 @@
 and a RegisterHotKey listener on its own Win32 message-loop thread.
 
   parse_chord("Ctrl+Alt+R")       -> Chord(mods=MOD_CONTROL|MOD_ALT, vk=0x52, text="Ctrl+Alt+R")
-  table_from_agent_config(cfg)    -> {"record": Chord, "mark": Chord, "discard": Chord},
+  table_from_agent_config(cfg)    -> {"record": Chord, "mark": Chord, "discard": Chord,
+                                     "pause": Chord, "take": Chord, "retake": Chord} (C1a),
                                      refusing two actions on one chord
   HotkeyListener                  registers the table on a dedicated thread and
                                   calls on_hotkey(action, foreground) for each press
@@ -47,7 +48,7 @@ log = logging.getLogger("peep.hotkeys")
 
 MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, MOD_NOREPEAT = 0x1, 0x2, 0x4, 0x8, 0x4000
 ERROR_HOTKEY_ALREADY_REGISTERED = 1409
-ACTIONS = ("record", "mark", "discard")
+ACTIONS = ("record", "mark", "discard", "pause", "take", "retake")
 
 _MODIFIERS = {"ctrl": MOD_CONTROL, "control": MOD_CONTROL, "alt": MOD_ALT, "shift": MOD_SHIFT,
               "win": MOD_WIN, "windows": MOD_WIN, "super": MOD_WIN}
@@ -68,7 +69,16 @@ _NAMED_KEYS = {
     "/": (0xBF, "Slash"), "backquote": (0xC0, "Backquote"), "`": (0xC0, "Backquote"),
     "quote": (0xDE, "Quote"), "'": (0xDE, "Quote"), "backslash": (0xDC, "Backslash"),
     "\\": (0xDC, "Backslash"), "[": (0xDB, "LeftBracket"), "]": (0xDD, "RightBracket"),
+    # Session C1a: the numeric keypad (NumLock on; with it off, Windows sends Home/End/... instead)
+    **{f"num{n}": (0x60 + n, f"Num{n}") for n in range(10)},
+    **{f"numpad{n}": (0x60 + n, f"Num{n}") for n in range(10)},
+    "nummultiply": (0x6A, "NumMultiply"), "numadd": (0x6B, "NumAdd"), "numplus": (0x6B, "NumAdd"),
+    "numsubtract": (0x6D, "NumSubtract"), "numminus": (0x6D, "NumSubtract"),
+    "numdecimal": (0x6E, "NumDecimal"), "numdivide": (0x6F, "NumDivide"),
 }
+# F13-F24 exist on no ordinary keyboard, so nothing types them: macro pads and mouse
+# software can emit them, and they may be bound without a modifier.
+BARE_OK_VK = range(0x7C, 0x88)
 
 
 class HotkeyError(ValueError):
@@ -91,8 +101,8 @@ def _key(name: str) -> tuple[int, str]:
         return 0x6F + n, f"F{n}"
     if low in _NAMED_KEYS:
         return _NAMED_KEYS[low]
-    raise HotkeyError(f"unknown key {name!r} (use a letter, a digit, F1-F24, or one of: "
-                      f"Space, Enter, Tab, Insert, Delete, Home, End, PageUp, PageDown, arrows, Pause, ...)")
+    raise HotkeyError(f"unknown key {name!r} (use a letter, a digit, F1-F24, Num0-Num9, NumAdd, ..., or one of: "
+                      f"Space, Enter, Tab, Backspace, Insert, Delete, Home, End, PageUp, PageDown, arrows, Pause, ...)")
 
 
 def parse_chord(text: str) -> Chord:
@@ -100,7 +110,7 @@ def parse_chord(text: str) -> Chord:
 
     Exactly one non-modifier key; at least one of Ctrl, Alt or Win, because a
     global hotkey on a bare key (or Shift+key) would swallow ordinary typing
-    in every application."""
+    in every application. The exception is F13-F24, which nothing types."""
     if not isinstance(text, str) or not text.strip():
         raise HotkeyError("empty hotkey")
     # A trailing '+' key ("Ctrl+Alt++") is spelled "Equals"/"Plus" instead; split simply.
@@ -118,9 +128,10 @@ def parse_chord(text: str) -> Chord:
             keys.append(p)
     if len(keys) != 1:
         raise HotkeyError(f"hotkey {text!r} needs exactly one non-modifier key, got {len(keys)}")
-    if not mods & (MOD_CONTROL | MOD_ALT | MOD_WIN):
-        raise HotkeyError(f"hotkey {text!r} needs Ctrl, Alt or Win; a bare key would steal typing everywhere")
     vk, key_text = _key(keys[0])
+    if not mods & (MOD_CONTROL | MOD_ALT | MOD_WIN) and vk not in BARE_OK_VK:
+        raise HotkeyError(f"hotkey {text!r} needs Ctrl, Alt or Win; a bare key would steal typing everywhere "
+                          f"(only F13-F24 may be bound alone)")
     canonical = "+".join([name for bit, name in _MOD_ORDER if mods & bit] + [key_text])
     return Chord(mods, vk, canonical)
 
@@ -148,7 +159,8 @@ def build_table(chords: dict[str, str]) -> dict[str, Chord]:
 
 def table_from_agent_config(agent_cfg) -> dict[str, Chord]:
     return build_table({"record": agent_cfg.record_hotkey, "mark": agent_cfg.mark_hotkey,
-                        "discard": agent_cfg.discard_hotkey})
+                        "discard": agent_cfg.discard_hotkey, "pause": agent_cfg.pause_hotkey,
+                        "take": agent_cfg.take_hotkey, "retake": agent_cfg.retake_hotkey})
 
 
 def describe_error(chord: Chord, winerror: int) -> str:

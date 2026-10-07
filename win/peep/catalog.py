@@ -14,14 +14,23 @@ capture that did not finish cleanly; its files are kept for inspection),
 the fold drops it). Every recording has a `uid` that survives renames, so
 the fold keys on it.
 
-The sidecar reserves `crop` and `marks` for session C (per-collection
-crop rectangle, mark-based cuts) and records `trim: null` until C trims.
+The sidecar reserves `crop` for session C and records `trim: null` until C
+trims. Session C1a made it `peep.sidecar/2`: a recording may now be several
+segments (hard pause), and it carries the event record session C1b renders
+from (segments, events, takes, pauses, summary). `/1` sidecars still load;
+`as_v2` presents one as a one-segment, no-take recording.
+
+Session C1a's naming audit: nothing here overwrites a file. New files are
+created exclusively (`create_json_exclusive`), moves refuse an existing
+target (`move_no_clobber`), and names are allocated against the folder
+(case-insensitively) and the catalog together (`Catalog.stems_in`).
 
 Sections:
-  1. Sidecar                    (~line 46)
-  2. Catalog events + fold      (~line 118)
-  3. Rename                     (~line 240)
-  4. Discard                    (~line 290)
+  1. Sidecar                    (~line 60)
+  2. Safe file operations       (~line 190)
+  3. Catalog events + fold      (~line 250)
+  4. Rename                     (~line 390)
+  5. Discard                    (~line 520)
 """
 
 from __future__ import annotations
@@ -30,6 +39,7 @@ import datetime as _dt
 import json
 import logging
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,7 +49,9 @@ from .logsetup import event
 
 log = logging.getLogger("peep.catalog")
 
-SIDECAR_SCHEMA = "peep.sidecar/1"
+SIDECAR_SCHEMA = "peep.sidecar/2"
+SIDECAR_SCHEMA_V1 = "peep.sidecar/1"
+SIDECAR_SCHEMAS = (SIDECAR_SCHEMA_V1, SIDECAR_SCHEMA)
 CATALOG_NAME = "catalog.jsonl"
 
 # ---------------------------------------------------------------------------
@@ -79,16 +91,22 @@ def new_sidecar(*, uid: str, slug: str, collection: str, file: str, created: str
         "ffmpeg": {"argv": None, "exit_code": None, "stderr_tail": None, "remux_argv": None},
         "trim": None,               # none applied yet (session C)
         "crop": None,               # RESERVED for session C: {"x","y","w","h"} in output pixels
-        "marks": [],                # RESERVED for session C: [{"t": seconds, "label": str}]
+        "marks": [],                # session B: [{"t", "label", "source", "flash", ...}]; C1a adds "segment"
+        # -- peep.sidecar/2 (session C1a): the event record session C1b renders from.
+        # The top-level video/audio/flash/timeline/ffmpeg blocks above describe segment 1
+        # (the file the catalog points at), so a one-segment recording reads exactly as /1.
+        "segments": [],             # one block per capture segment, in order (events.segment_block)
+        "events": [],               # every take / retake / pause / resume / mark press, accepted or ignored
+        "takes": [],                # derived from events: [{"id", "status": kept|discarded, "open", "close", ...}]
+        "pauses": [],               # [{"after_segment", "pause_event", "resume_event", "paused_qpc", ...}]
+        "summary": None,            # {"segments", "takes", "takes_discarded", "kept_s", "total_s", "whole"}
     }
 
 
 def sidecar_path(media_path: Path) -> Path:
-    """`.../2026-10-05-demo.mp4` -> `.../2026-10-05-demo.json` (also for
-    `.recording.mkv` captures)."""
-    name = media_path.name
-    stem = name[: -len(".recording.mkv")] if name.endswith(".recording.mkv") else media_path.stem
-    return media_path.with_name(stem + ".json")
+    """`.../2026-10-05-demo.mp4` -> `.../2026-10-05-demo.json`, for every file of
+    the recording (`.recording.mkv` captures, `.seg2.mp4` segments, `.cut.mp4`)."""
+    return media_path.with_name(naming.stem_of(media_path.name) + ".json")
 
 
 def write_json_atomic(path: Path, data: dict) -> None:
@@ -108,15 +126,101 @@ def write_sidecar(path: Path, data: dict) -> None:
 
 
 def read_sidecar(path: Path) -> dict:
+    """The sidecar as stored (`peep.sidecar/1` or `/2`); see `as_v2` for one shape."""
     with Path(path).open(encoding="utf-8") as fh:
         data = json.load(fh)
-    if data.get("schema") != SIDECAR_SCHEMA:
+    if data.get("schema") not in SIDECAR_SCHEMAS:
         raise ValueError(f"{path}: unexpected sidecar schema {data.get('schema')!r}")
     return data
 
 
+def as_v2(data: dict) -> dict:
+    """A `peep.sidecar/2` view of any sidecar (a copy; the input is untouched).
+
+    Migration note: a `/1` sidecar is a single capture with no events, so its
+    view is one segment built from the top-level blocks (file, duration,
+    flashes, timeline, video, audio, ffmpeg), its marks placed in segment 1,
+    no takes and no pauses, and a summary that keeps the whole recording.
+    `/1` files on disk are never rewritten to `/2`; a rename keeps the version."""
+    if data.get("schema") == SIDECAR_SCHEMA:
+        return data
+    if data.get("schema") != SIDECAR_SCHEMA_V1:
+        raise ValueError(f"unexpected sidecar schema {data.get('schema')!r}")
+    out = json.loads(json.dumps(data))
+    flash, timeline = out.get("flash") or {}, out.get("timeline") or {}
+    dur = out.get("duration_s")
+    epoch = (out.get("audio") or {}).get("epoch") or {}
+    out["schema"] = SIDECAR_SCHEMA
+    out["segments"] = [{
+        "index": 1, "file": out.get("file"), "status": out.get("status"), "duration_s": dur,
+        "started_at": timeline.get("ffmpeg_started_at"), "ffmpeg_started_qpc": timeline.get("ffmpeg_started_qpc"),
+        "input0_qpc": timeline.get("input0_qpc"), "video_epoch_qpc_est": epoch.get("video_epoch_qpc_est"),
+        "stop_reason": timeline.get("stop_reason"), "flash": {"start": flash.get("start"), "stop": flash.get("stop")},
+        "timeline": timeline, "video": out.get("video"), "audio": out.get("audio"), "ffmpeg": out.get("ffmpeg"),
+        "migrated_from": SIDECAR_SCHEMA_V1}]
+    for m in out.get("marks") or []:
+        m.setdefault("segment", 1)
+    out["events"], out["takes"], out["pauses"] = [], [], []
+    out["summary"] = {"segments": 1, "takes": 0, "takes_discarded": 0, "kept_s": dur, "total_s": dur, "whole": True}
+    return out
+
+
 # ---------------------------------------------------------------------------
-# 2. Catalog events + fold
+# 2. Safe file operations (session C1a's naming audit)
+# ---------------------------------------------------------------------------
+
+
+def create_json_exclusive(path: Path, data: dict) -> None:
+    """Create `path` with `data`, refusing (FileExistsError) if it exists: the
+    sidecar that reserves a new recording's stem is born this way, so a name
+    taken between allocation and creation is never overwritten. Later
+    rewrites of our own sidecar use `write_sidecar` (temp file + replace)."""
+    with Path(path).open("x", encoding="utf-8", newline="\n") as fh:
+        json.dump(data, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    event(log, logging.INFO, "sidecar.create", path=str(path), uid=data.get("uid"))
+
+
+def name_in_folder(folder: Path, name: str, listdir=os.listdir) -> str | None:
+    """The entry of `folder` that is `name` compared case-insensitively (what
+    Windows would open), or None."""
+    want = name.casefold()
+    for n in naming.list_names(str(folder), listdir):
+        if n.casefold() == want:
+            return n
+    return None
+
+
+def move_no_clobber(src: Path, dst: Path) -> None:
+    """Move/rename `src` to `dst`, never replacing anything: FileExistsError if
+    `dst` exists, under any capitalisation. On Windows os.rename already
+    refuses an existing target; on POSIX a hard link (which also refuses) then
+    an unlink, falling back to a checked rename where links are unsupported."""
+    src, dst = Path(src), Path(dst)
+    clash = name_in_folder(dst.parent, dst.name)
+    if clash is not None and not (dst.parent / clash).samefile(src):
+        raise FileExistsError(f"refusing to overwrite {dst.parent / clash}")
+    if os.name == "nt":
+        os.rename(src, dst)
+    else:
+        try:
+            os.link(src, dst)
+        except FileExistsError:
+            raise FileExistsError(f"refusing to overwrite {dst}") from None
+        except OSError as exc:            # no hard links here (EPERM/EXDEV/ENOTSUP): checked rename
+            event(log, logging.DEBUG, "file.link_unsupported", src=str(src), error=repr(exc))
+            if os.path.lexists(dst):
+                raise FileExistsError(f"refusing to overwrite {dst}") from None
+            os.rename(src, dst)
+        else:
+            os.unlink(src)
+    event(log, logging.INFO, "file.rename", src=str(src), dst=str(dst))
+
+
+# ---------------------------------------------------------------------------
+# 3. Catalog events + fold
 # ---------------------------------------------------------------------------
 
 
@@ -130,10 +234,11 @@ class Entry:
     created: str
     duration_s: float | None
     status: str        # ok | failed
+    suffixed: bool = False     # set by rename(): the wanted name was taken, a counter was added
 
     @property
     def stem(self) -> str:
-        return Path(self.file).stem
+        return naming.stem_of(Path(self.file).name)
 
     def media_path(self, root: Path) -> Path:
         return Path(root) / Path(self.file)
@@ -195,6 +300,15 @@ class Catalog:
                 state.pop(uid, None)
         return list(state.values())
 
+    def stems_in(self, collection: str, exclude_uid: str | None = None) -> set[str]:
+        """Stems the catalog's current recordings hold in `collection`, failed
+        ones included and whether or not their files still exist: the naming
+        audit treats them as taken, so a recording whose file was moved away
+        by hand is never given a twin. Compared case-insensitively."""
+        coll = collection.casefold()
+        return {naming.stem_of(Path(e.file).name) for e in self.entries()
+                if e.file and e.uid != exclude_uid and e.collection.casefold() == coll}
+
     def recent_collections(self, limit: int = 10) -> list[str]:
         """Collections that hold recordings now, most recently active first
         (a recording's latest event, a rename included, dates its current
@@ -233,88 +347,195 @@ class Catalog:
         return matches[0]
 
 
+_UID = re.compile(r"^[0-9a-f]{32}$")
+
+
+class RecordingInProgress(ValueError):
+    """The recording is still live (recording or paused): its files are being
+    written, so it cannot be renamed or discarded yet."""
+
+
+def resolve_ref(cat: Catalog, ref) -> Entry:
+    """An Entry, or anything a user or the agent names a recording by: 'last', a
+    stem, a file, a uid prefix, or a full uid (32 hex digits; tried as a uid
+    first, then as a name, so a 32-character stem still resolves)."""
+    if isinstance(ref, Entry):
+        return ref
+    ref = str(ref)
+    if _UID.match(ref):
+        try:
+            return _resolve_uid(cat, ref)
+        except LookupError:
+            pass
+    return cat.resolve(ref)
+
+
+def refuse_if_live(entry: Entry, live_uid: str | None, doing: str) -> None:
+    if live_uid and entry.uid == live_uid:
+        raise RecordingInProgress(f"{entry.file or entry.title} is still recording (or paused); "
+                                  f"{doing} it after it stops")
+
+
 def relpath_posix(root: Path, path: Path) -> str:
     return Path(os.path.relpath(path, root)).as_posix()
 
 
 # ---------------------------------------------------------------------------
-# 3. Rename
+# 4. Rename
 # ---------------------------------------------------------------------------
 
 
-def rename(root: Path, ref: str, new_name: str, collection: str | None = None) -> Entry:
+@dataclass
+class RenamePlan:
+    """What a rename will do, computed before anything moves. The stop dialog
+    shows `final_name` live as the user types; `rename` then executes the plan.
+    `suffixed` is True when the wanted name is taken and a counter was added."""
+    entry: Entry
+    title: str
+    slug: str
+    collection: str
+    stem: str                  # the stem the recording will have
+    wanted_stem: str           # <date>-<slug> before any counter
+    src_stem: str
+    noop: bool                 # same folder, same stem: nothing to move
+
+    @property
+    def suffixed(self) -> bool:
+        return self.stem != self.wanted_stem and not self.noop
+
+    def final_name(self) -> str:
+        """`collection/stem.ext` as the catalog will list it."""
+        ext = Path(self.entry.file).name[len(self.src_stem):]
+        return f"{self.collection}/{self.stem}{ext}"
+
+
+def plan_rename(root: Path, ref, new_name: str, collection: str | None = None,
+                cat: Catalog | None = None, live_uid: str | None = None) -> RenamePlan:
+    """Resolve, validate and allocate a rename without touching any file.
+    `ref` is an Entry or anything `resolve_ref` takes (for the dialog, the uid).
+    `live_uid` is the recording in progress (active.json): it cannot be renamed
+    while its segments are still being written."""
+    cat = cat or Catalog(root)
+    entry = resolve_ref(cat, ref)
+    refuse_if_live(entry, live_uid, "rename")
+    slug = naming.slug_from_user(new_name)
+    dest_collection = naming.validate_collection(collection) if collection else entry.collection
+    if not entry.file:
+        raise FileNotFoundError(f"recording {entry.uid[:8]} has no file (its capture never started)")
+    src_name = Path(entry.file).name
+    src_stem = naming.stem_of(src_name)
+    date_str, _, _ = naming.split_stem(src_stem)
+    date = _dt.date.fromisoformat(date_str)
+    same_folder = dest_collection.casefold() == entry.collection.casefold()
+    dest_dir = Path(root) / dest_collection
+    src_dir = Path(root) / Path(entry.file).parent
+    ignore = [n for n in naming.list_names(str(src_dir)) if naming.owned_by(n, src_stem)] if same_folder else []
+    stem = naming.allocate_stem(str(dest_dir), date, slug, reserved=cat.stems_in(dest_collection, entry.uid),
+                                ignore=ignore)
+    return RenamePlan(entry=entry, title=new_name.strip(), slug=slug, collection=dest_collection, stem=stem,
+                      wanted_stem=naming.stem_for(date, slug), src_stem=src_stem,
+                      noop=same_folder and stem.casefold() == src_stem.casefold())
+
+
+def _family(folder: Path, stem: str) -> list[str]:
+    """The files peep owns for `stem` in `folder` (naming.OWNED_REST), the
+    sidecar last so a half-finished move never strands media without one."""
+    names = [n for n in naming.list_names(str(folder)) if naming.owned_by(n, stem)
+             and not n.casefold().endswith(".json.tmp")]
+    return sorted(names, key=lambda n: (n.casefold().endswith(".json"), n))
+
+
+def rename(root: Path, ref: str, new_name: str, collection: str | None = None,
+           live_uid: str | None = None) -> Entry:
     """Rename a recording (and optionally move it to another collection).
 
     The date prefix of the original stem is kept; the slug comes from
-    `new_name`; a collision gets the usual counter suffix. Media file and
-    sidecar move together, the sidecar's title/slug/collection/file are
-    updated, and a `renamed` event is appended. Nothing is overwritten:
-    if a target appears between allocation and move, the move fails loudly.
-    """
-    cat = Catalog(root)
-    entry = cat.resolve(ref)
-    slug = naming.slug_from_user(new_name)
-    dest_collection = naming.validate_collection(collection) if collection else entry.collection
+    `new_name`; a name already taken in the target folder (case-insensitively)
+    or held by another catalogued recording gets the usual counter suffix,
+    and `entry.suffixed` says so. Every file of the recording moves together
+    (media, later segments, the sidecar, any `.cut.*` render), each one
+    refusing to overwrite; if one cannot move (a player holding it), the ones
+    already moved are moved back and the error is raised. Then the sidecar's
+    title/slug/collection/file and segment file names are updated and a
+    `renamed` event is appended."""
+    root = Path(root)
+    plan = plan_rename(root, ref, new_name, collection, live_uid=live_uid)
+    entry = plan.entry
     src_media = entry.media_path(root)
     if not src_media.exists():
         raise FileNotFoundError(f"recording file is missing: {src_media}")
-    src_side = sidecar_path(src_media)
-    date_str, _, _ = naming.split_stem(entry.stem)
-    date = _dt.date.fromisoformat(date_str)
-    dest_dir = Path(root) / dest_collection
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    stem = naming.allocate_stem(str(dest_dir), date, slug,
-                                exists=lambda p: os.path.exists(p) and Path(p).resolve() not in
-                                {src_media.resolve(), src_side.resolve()})
-    dest_media = dest_dir / (stem + src_media.suffix)
-    dest_side = dest_dir / (stem + ".json")
-    if dest_media == src_media:
+    entry.suffixed = False
+    if plan.noop:
         return entry
-    for target in (dest_media, dest_side):
-        if target.exists():
-            raise FileExistsError(f"refusing to overwrite {target}")
-    os.rename(src_media, dest_media)
-    event(log, logging.INFO, "file.rename", src=str(src_media), dst=str(dest_media))
-    if src_side.exists():
-        data = read_sidecar(src_side)
-        data.update(title=new_name.strip(), slug=slug, collection=dest_collection, file=dest_media.name)
+    src_dir, dest_dir = src_media.parent, root / plan.collection
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    names = _family(src_dir, plan.src_stem)
+    moves = [(src_dir / n, dest_dir / (plan.stem + n[len(plan.src_stem):])) for n in names]
+    for _, dst in moves:                  # refuse before moving anything
+        clash = name_in_folder(dest_dir, dst.name)
+        if clash is not None and naming.stem_of(clash).casefold() != plan.src_stem.casefold():
+            raise FileExistsError(f"refusing to overwrite {dest_dir / clash}")
+    done: list[tuple[Path, Path]] = []
+    try:
+        for src, dst in moves:
+            move_no_clobber(src, dst)
+            done.append((src, dst))
+    except OSError as exc:
+        event(log, logging.ERROR, "rename.failed_midway", moved=len(done), of=len(moves), error=repr(exc))
+        for src, dst in reversed(done):
+            try:
+                move_no_clobber(dst, src)
+            except OSError as back:
+                event(log, logging.ERROR, "rename.rollback_failed", src=str(dst), dst=str(src), error=repr(back))
+        raise
+    dest_media = dest_dir / (plan.stem + src_media.name[len(plan.src_stem):])
+    dest_side = dest_dir / (plan.stem + ".json")
+    if dest_side.exists():
+        data = read_sidecar(dest_side)
+        data.update(title=plan.title, slug=plan.slug, collection=plan.collection, file=dest_media.name)
+        for seg in data.get("segments") or []:
+            for key in ("file", "capture_file"):
+                if isinstance(seg.get(key), str) and naming.stem_of(seg[key]).casefold() == plan.src_stem.casefold():
+                    seg[key] = plan.stem + seg[key][len(plan.src_stem):]
         write_sidecar(dest_side, data)
-        os.remove(src_side)
     else:
         event(log, logging.WARNING, "sidecar.missing", media=str(src_media))
     rel = relpath_posix(root, dest_media)
+    cat = Catalog(root)
     cat.append({"event": "renamed", "uid": entry.uid, "from": entry.file, "to": rel,
-                "collection": dest_collection, "title": new_name.strip()})
-    entry.file, entry.collection, entry.title = rel, dest_collection, new_name.strip()
+                "collection": plan.collection, "title": plan.title,
+                **({"suffixed_from": plan.wanted_stem} if plan.suffixed else {})})
+    if plan.suffixed:
+        event(log, logging.INFO, "rename.suffixed", wanted=plan.wanted_stem, got=plan.stem)
+    entry.file, entry.collection, entry.title = rel, plan.collection, plan.title
+    entry.suffixed = plan.suffixed
     return entry
 
 
 # ---------------------------------------------------------------------------
-# 4. Discard
+# 5. Discard
 # ---------------------------------------------------------------------------
 
 
-def discard(root: Path, ref: str, reason: str = "user") -> Entry:
+def discard(root: Path, ref: str, reason: str = "user", live_uid: str | None = None) -> Entry:
     """Delete a recording on purpose (session B's discard hotkey / dialog):
-    the media file, its sidecar and any leftover capture go, and a
-    `discarded` event is appended so the fold forgets it. A file already
-    missing is logged, not fatal: the intent is "this take is gone".
-    A file that cannot be deleted (open in a player: WinError 32) raises
-    before the event is written, so the catalog never claims a deletion
-    that did not happen."""
+    every file peep owns for it goes (media, later segments, sidecar, any
+    leftover capture or render; naming.OWNED_REST, nothing else in the
+    folder), and a `discarded` event is appended so the fold forgets it. A
+    file already missing is logged, not fatal: the intent is "this take is
+    gone". A file that cannot be deleted (open in a player: WinError 32)
+    raises before the event is written, so the catalog never claims a
+    deletion that did not happen."""
     cat = Catalog(root)
-    entry = cat.resolve(ref) if ref == "last" or len(ref) < 32 else _resolve_uid(cat, ref)
-    media = entry.media_path(root) if entry.file else None
-    targets = []
-    if media is not None:
-        targets += [media, sidecar_path(media)]
-        stem = sidecar_path(media).stem
-        targets += [media.with_name(stem + suffix) for suffix in naming.OWNED_SUFFIXES]
-    seen, removed = set(), []
-    for t in targets:
-        if t in seen:
-            continue
-        seen.add(t)
+    entry = resolve_ref(cat, ref)
+    refuse_if_live(entry, live_uid, "discard")
+    targets: list[Path] = []
+    if entry.file:
+        media = entry.media_path(root)
+        stem = naming.stem_of(media.name)
+        targets = [media.parent / n for n in naming.list_names(str(media.parent)) if naming.owned_by(n, stem)]
+    removed = []
+    for t in sorted(targets):
         if t.exists():
             os.remove(t)
             removed.append(t.name)

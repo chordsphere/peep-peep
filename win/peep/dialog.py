@@ -8,7 +8,9 @@ Shown after a hotkey stop (never for `peep rec` + q or `peep stop`):
                field, so it is one keystroke away while typing the name) cycle
                the recent ones from the catalog; typing a new name creates it
   [row reserved for session C's post-processing toggles: `postprocess_row`]
-  status       duration · size · path
+  saves as     (C1a) a live preview of the file name Enter will produce, counter
+               included when the typed name is taken
+  status       duration · takes · kept of total · segments · size · path
   keys         Enter save · Esc keep the automatic name · Delete discard
 
 Delete asks for one confirming keystroke (Delete again, or Y), because it
@@ -127,10 +129,25 @@ def format_size(n: int | None) -> str:
     return f"{n / 1024 ** 3:.2f} GB"
 
 
-def status_line(duration_s: float | None, size_bytes: int | None, path: str) -> str:
+def status_line(duration_s: float | None, size_bytes: int | None, path: str, takes: str | None = None) -> str:
+    """'05:02  ·  3 takes  ·  2:14 kept of 5:02  ·  2 segments  ·  54.1 MB  ·  path'; the
+    takes part (events.summary_line) only when the recording has takes or segments."""
     from .pill import format_elapsed
     dur = format_elapsed(duration_s) if isinstance(duration_s, (int, float)) else "?"
-    return f"{dur}  ·  {format_size(size_bytes)}  ·  {path}"
+    mid = f"  ·  {takes}" if takes else ""
+    return f"{dur}{mid}  ·  {format_size(size_bytes)}  ·  {path}"
+
+
+def preview_text(plan) -> str:
+    """The dialog's "saves as" line for a catalog.RenamePlan: the final name, and
+    why it has a counter when it got one. Every surface shows the final name."""
+    name = plan.final_name()
+    taken = plan.stem.casefold() != plan.wanted_stem.casefold()
+    if plan.noop:
+        return f"keeps its name: {name}" + (f"   ({plan.wanted_stem} is taken)" if taken else "")
+    if taken:
+        return f"saves as {name}   ({plan.wanted_stem} is taken, so a counter is added)"
+    return f"saves as {name}"
 
 
 @dataclass
@@ -142,6 +159,7 @@ class DialogModel:
     status: str
     title: str = "peep — name this recording"
     options: dict = field(default_factory=dict)    # session C's toggles land here
+    preview: Callable[[str, str], str] | None = None   # C1a: (name, collection) -> the "saves as" line
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +206,12 @@ class StopDialog:
         self.status.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self.message = ttk.Label(frame, text=HINT, foreground="#607D8B")
         self.message.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        # Session C1a: what Enter will save as, kept current while typing (counter included).
+        self.preview = ttk.Label(frame, text="", foreground="#1B5E20")
+        self.preview.grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        for var in (self.name_var, self.coll_var):
+            var.trace_add("write", lambda *_: self._refresh_preview())
+        self._refresh_preview()
 
         for widget in (self.name_entry, self.coll_box):
             widget.bind("<KeyPress>", self._on_key)
@@ -233,6 +257,16 @@ class StopDialog:
 
     def _say(self, text: str, color: str) -> None:
         self.message.configure(text=text, foreground=color)
+
+    def _refresh_preview(self) -> None:
+        if self.model.preview is None or self.closed:
+            return
+        try:
+            text = self.model.preview(self.name_var.get(), self.coll_var.get())
+        except Exception as exc:          # a preview must never break the dialog; say why instead
+            event(log, logging.WARNING, "dialog.preview_failed", error=repr(exc))
+            text = f"(no preview: {exc})"
+        self.preview.configure(text=text)
 
     def _act(self, action: str) -> None:
         if self.closed:

@@ -199,8 +199,10 @@ def cmd_reload(args, cfg) -> int:
 def cmd_install(args, cfg) -> int:
     link = lifecycle.install_startup_entry(lifecycle.startup_dir(), lifecycle.app_dir(), sys.executable)
     _out(f"startup entry: {link}")
+    ag = cfg.agent
     _out("  the agent will start at every login (hotkeys: "
-         f"{cfg.agent.record_hotkey} record/stop, {cfg.agent.mark_hotkey} mark, {cfg.agent.discard_hotkey} discard)")
+         f"{ag.record_hotkey} record/stop, {ag.mark_hotkey} mark, {ag.discard_hotkey} discard, "
+         f"{ag.pause_hotkey} pause/resume, {ag.take_hotkey} take, {ag.retake_hotkey} retake)")
     if args.no_start:
         return 0
     args.wait = 15.0

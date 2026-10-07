@@ -7,6 +7,8 @@ and a named file in a predictable place. `start.md` has the original intent.
 ```
 Ctrl+Alt+R               # in any app: magenta flash, REC pill, recording starts
                          # ...do the thing... (Ctrl+Alt+M drops a mark)
+                         # (Ctrl+Alt+T opens/closes a take, Ctrl+Alt+Backspace redoes it,
+                         #  Ctrl+Alt+P pauses: see "Editing while you record")
 Ctrl+Alt+R               # green flash; a dialog asks for the name
 bale pack demo ⏎         # typed over the suggested name; Enter saves. Done.
 ```
@@ -35,7 +37,11 @@ presets and per-collection crop. B and C import A's modules unchanged.
 **Session A.1** (landed between B and C) is the audio pipeline: computer
 audio by default, captured by our own WASAPI code, a microphone option that
 no longer leads the picture, and `peep config set` so the config never needs
-a text editor. See [Audio](#audio).
+a text editor. See [Audio](#audio). **Session C1a** (landed) is the capture
+side of editing: hard pause as segments of one recording, takes and retakes
+recorded as events, corner-patch fiducials, and a naming audit. **Session
+C1b** renders from that record (cut to takes, concatenate segments). See
+[Editing while you record](#editing-while-you-record).
 
 ## Install
 
@@ -77,12 +83,15 @@ points at `pythonw.exe %LOCALAPPDATA%\peep\app\peepw.py`.
 |---|---|
 | `peep rec [slug] [-c NAME]` | Record the screen and the computer's audio. Stop with **q**, **Enter** or **Ctrl-C** in that terminal, or `peep stop` from another. With no slug the name comes from the foreground window (from a terminal at `~/peep-peep` that is `terminal-peep-peep`). Options: `--audio system\|mic\|both\|none` (this recording only; the default is `audio.sources`), `--no-mic` (takes the mic out: both → system, mic → none), `--no-flash`, `--scale 1920x1200`, `--encoder qsv\|qsv-download\|x264`, `--fps N`. |
 | `peep stop` | Ask the running recording to stop and wait until its file is finalized; prints the path. `--no-wait` returns immediately. |
-| `peep mark [--label TEXT]` | Drop a mark in the running recording (cyan flash + an entry in the sidecar's `marks`). Same as **Ctrl+Alt+M**. |
+| `peep mark [--label TEXT]` | Drop a mark in the running recording (a cyan corner patch + an entry in the sidecar's `marks`). Same as **Ctrl+Alt+M**. |
+| `peep pause` / `peep resume` | Hard pause: capture stops and the segment is saved; resume starts the next segment of the same recording. Each waits until it has happened (`--no-wait` doesn't). Same as **Ctrl+Alt+P**. |
+| `peep take` | Open a take, or close the open one. Same as **Ctrl+Alt+T**. |
+| `peep retake` | Discard the most recent take (open or closed) and open a fresh one now. Same as **Ctrl+Alt+Backspace**. |
 | `peep agent install\|uninstall` | Add (and start) or remove the hotkey agent's Startup-folder entry. |
 | `peep agent start\|stop\|restart\|status\|reload` | Control the running agent; see below. |
 | `peep ls [-c NAME] [--all] [--json]` | List recordings from the catalog (newest last). `--all` includes failed captures. |
 | `peep open [last\|STEM] [--folder]` | Open with the Windows default player, or show it in Explorer. |
-| `peep rename last NAME [-c NAME]` | Rename (the date prefix stays), optionally moving it to another collection. The sidecar moves with it. |
+| `peep rename last NAME [-c NAME]` | Rename (the date prefix stays), optionally moving it to another collection. The sidecar and every segment move with it. A name that is taken gets a counter, and the command says so. |
 | `peep doctor [--capture]` | Check Python, ffmpeg, ddagrab/dshow, encoders, the audio devices (with a 1.5 s loopback capture while a short test tone plays), the storage root and tkinter. It never installs anything. |
 | `peep config [--init]` | Show the effective config, or write a commented template. |
 | `peep config get [KEY]` | One key's value (`peep config get audio.sources` → `"system"`), or every key with whether it comes from the file or the default. |
@@ -105,10 +114,13 @@ no tray icon; the REC pill and short on-screen messages are its only UI.
 | Hotkey | Does |
 |---|---|
 | **Ctrl+Alt+R** | Not recording: start, named after the window you are in at the keypress, in the last-used collection. Recording: stop, then the naming dialog. |
-| **Ctrl+Alt+M** | Drop a mark: a cyan flash (captured, for session C) and an entry in the sidecar's `marks`. |
+| **Ctrl+Alt+M** | Drop a mark: a cyan corner patch (captured, for session C) and an entry in the sidecar's `marks`. |
 | **Ctrl+Alt+X** | Stop and delete the take: file and sidecar are removed, and the catalog records it as `discarded`. |
+| **Ctrl+Alt+P** | Hard pause / resume (session C1a). |
+| **Ctrl+Alt+T** | Open a take / close it (session C1a). |
+| **Ctrl+Alt+Backspace** | Retake: discard the most recent take, open a fresh one (session C1a). |
 
-All three are set in `[agent]` in `config.toml`. If another app already
+All six are set in `[agent]` in `config.toml`. If another app already
 owns a chord, the agent says so on screen and in `peep agent status`,
 naming the chord. It retries for a minute, because at login the shell may
 still be settling, and then tells you which config key to change.
@@ -131,9 +143,15 @@ anyway, and `pill_position` moves it.
 | **Esc** | Keep the automatic name in the current collection. |
 | **Delete**, then **Delete** or **Y** | Discard the take. Any other key after the first Delete cancels. In this dialog Delete is the discard key, not a text-editing key; Backspace still edits. |
 
-The status line shows duration, size and path. If the rename fails
-(say the file is open in a player), the dialog stays open with the
-reason. `dialog = false` skips the dialog and keeps automatic names.
+The name is prefilled with the name the file actually has, counter
+included (`…-2` when the automatic name was taken). A green line under it
+shows, as you type, what Enter will save as: `saves as
+movies/2026-10-06-black-swan-2.mp4 (2026-10-06-black-swan is taken, so a
+counter is added)`. The status line shows duration, then (when the
+recording has takes or was paused) `3 takes · 02:14 kept of 05:02 · 2
+segments`, then size and path. If the rename fails (say the file is open in a
+player), the dialog stays open with the reason. `dialog = false` skips the
+dialog and keeps automatic names.
 
 **Terminal recordings keep their old behaviour.** `peep rec` + q and
 `peep stop` never show the dialog. The agent still sees them: the pill
@@ -155,6 +173,62 @@ code. When WSL is already running, the agent checks at start whether its
 copy matches the repo, and `peep agent status` shows the result. It never
 starts WSL to find out.
 
+## Editing while you record
+
+Session C1a records *what to keep*; session C1b will cut it. Nothing you
+press while recording can lose footage: the session is always captured
+whole, and the cuts are decided at render from the events below.
+
+| | Chord | WSL | What it means |
+|---|---|---|---|
+| **Session** | Ctrl+Alt+R | `peep rec` / `peep stop` | On and off, as before. |
+| **Hard pause** | Ctrl+Alt+P (toggles) | `peep pause`, `peep resume` | Capture stops: the segment's file is finished (stop flash, `q`, remux). Nothing is recorded while paused. Resume starts a new segment of the same recording (start flash, fresh ffmpeg and audio children, their own anchor). The pill shows **❚❚ PAUSED** in orange, with the time captured so far standing still. |
+| **Take** | Ctrl+Alt+T (toggles) | `peep take` | The first press opens a take (a **blue** corner patch), the next closes it (**red**). Only material inside takes survives the render. With no take at all, the whole recording is kept, so a quick recording behaves as before. A take is also the soft pause: capture continues and the gap is cut at render. |
+| **Retake** | Ctrl+Alt+Backspace | `peep retake` | Discard the most recent take, open or closed, and open a fresh one now (**yellow**). Mid-take: redo from the top of this take. After a close: redo the take just finished. Undo depth is one. |
+| **Mark** | Ctrl+Alt+M | `peep mark` | A chapter or attention point (**cyan**), never a cut. |
+| **Discard** | Ctrl+Alt+X | | The whole recording, every segment. |
+
+- **Takes carry across a pause.** A take open when you pause is still open
+  when you resume; the segment boundary is a cut with nothing to remove.
+  Presses while paused count, at the boundary: a take opened while paused
+  starts with the next segment, one closed while paused ends with the last.
+- **Debounce.** A second press of the same chord within `debounce_ms` (1 s)
+  is ignored: on the status line (`· take ignored (debounce)`), in the log,
+  and in the sidecar. A deliberate second retake after it is honoured. It is
+  per chord, so closing a take and pressing retake straight away both count.
+  The WSL commands are never debounced.
+- **The pill** shows the take state: `● 02:14  ◉ take 3` while take 3 is open,
+  `● 02:14  ○ 3 takes` between takes.
+- **Corner patches.** Take, retake and mark show a solid 200×200 px square
+  for 200 ms in the corner opposite the pill (bottom-left by default). It is
+  captured on purpose, like the flashes, so C1b can find each event in the
+  video; it avoids a full-screen strobe every few sentences. Session and
+  segment start/stop keep the full-screen magenta and green flashes. All
+  fiducial colours are in `[flash]` and must differ clearly from each other;
+  `mark_style = "full"` brings back B's full-screen cyan for marks.
+- **Chords** are in `[agent]` (`pause_hotkey`, `take_hotkey`,
+  `retake_hotkey`, `debounce_ms`). Besides letters and F1–F24, the keypad
+  works (`Ctrl+Alt+Num1`, `NumAdd`…, with NumLock on), and **F13–F24 may be
+  bound alone**, since no keyboard types them: a macro pad, or mouse software
+  that maps a side button to F13, gives you a one-button take.
+
+What lands on disk for a recording with two pauses:
+
+```
+inbox\2026-10-06-terminal-peep-peep.mp4        segment 1 (the catalog points here)
+inbox\2026-10-06-terminal-peep-peep.seg2.mp4   segment 2
+inbox\2026-10-06-terminal-peep-peep.seg3.mp4   segment 3
+inbox\2026-10-06-terminal-peep-peep.json       one sidecar: the segments and every event
+```
+
+Each segment is remuxed to MP4 when it ends, so a paused recording is
+already safe: it is in the catalog and on disk while you are away. `peep
+open` plays segment 1; C1b concatenates the segments. A recording that was
+never paused has exactly the files it had before. While a recording is live
+(recording or paused) it cannot be renamed or discarded from the CLI: `peep
+rename last …` says so and does nothing, since the next segment is still to
+be written under its name. Rename it after it stops.
+
 ## Where files land
 
 ```
@@ -164,6 +238,7 @@ C:\Users\chord\Videos\peep\            storage root (config: root)
     2026-10-05-terminal-peep-peep.mp4
     2026-10-05-terminal-peep-peep.json sidecar
     2026-10-05-terminal-peep-peep-2.mp4   same name, same day: counter suffix
+    2026-10-05-demo.seg2.mp4             a later segment of 2026-10-05-demo (session C1a)
 
 %LOCALAPPDATA%\peep\                   peep's own files
   config.toml                          optional; defaults apply without it
@@ -180,7 +255,20 @@ C:\Users\chord\Videos\peep\            storage root (config: root)
 Recordings never go under `\\wsl.localhost`; config validation refuses such
 a root.
 
-**The sidecar** (`peep.sidecar/1`) records the title, slug, collection,
+**Nothing is ever overwritten (session C1a).** A recording's files all start
+with its stem: `<stem>.mp4`, `.seg<k>.mp4`, `.json`, and `.cut.mp4` and the
+rest of the `.cut.*` family, reserved for C1b's renders. A stem is free only
+if no file in the folder starts with it (compared ignoring case, as Windows
+does) and the catalog lists no recording with it, even one whose file has
+gone. Otherwise the next counter is used: for `peep rec`, the hotkey, `peep
+rename` and the dialog's save. Sidecars are created exclusively, moves refuse
+an existing target, and a rename that cannot move one file (a player holding
+it) puts back the ones it moved. Every place that shows the name shows the
+final name. Names are ASCII, kebab-case, at most 48 characters, and never a
+Windows device name (`con`, `nul`, `com1`…); collections follow the same
+rule.
+
+**The sidecar** (`peep.sidecar/2` since C1a; `/1` before) records the title, slug, collection,
 creation time, duration, the foreground window and process at start, the
 video pipeline, encoder, capture and output size, the audio device, the
 flash colours with their agent-side timestamps (wall clock and seconds
@@ -198,14 +286,50 @@ session B: each mark has `t` (seconds since the ffmpeg launch, at the
 keypress), its `label`, `source` (hotkey / cli) and its cyan flash's own
 stamp, on the same clock as the start and stop flashes.
 
+**The event record (`peep.sidecar/2`, session C1a)** is what C1b renders
+from. The top-level `video`, `audio`, `flash`, `timeline` and `ffmpeg` blocks
+describe segment 1, so a one-segment recording reads exactly as before.
+`duration_s` is the whole recording (all segments). New keys:
+
+- `segments`: one per capture, in order. Each has `index`, `file`, `status`,
+  `duration_s`, `started_at`, `ffmpeg_started_qpc`, `input0_qpc`,
+  `video_epoch_qpc_est` (the QPC instant of its first frame: media t=0),
+  `stop_reason` (`pause` or how the recording ended), and its own `flash`
+  (start/stop), `timeline`, `video`, `audio` (its own anchor and clap) and
+  `ffmpeg`.
+- `events`: every take, retake, pause, resume and mark press, accepted or
+  not, in order: `kind`, `source` (`hotkey`/`cli`), `qpc` (the press,
+  stamped by whoever pressed), `segment` and `media_s` (seconds from that
+  segment's first frame), or `after_segment` for a press made while paused,
+  `accepted`, `ignored` (`debounce`, `already-paused`, …), `action`
+  (`open`/`close`/`pause`/`resume`/`mark`), `take`, `discarded_take`, and the
+  `fiducial` it showed (`color`, `style: patch`, `rect` and `screen` in
+  physical pixels, `shown_qpc`, `since_ffmpeg_start_s`).
+- `takes`: derived: `id`, `status` (`kept`/`discarded`), `open` and `close`
+  (event id, `segment`/`after_segment`, `media_s`; a take still open at the
+  end closes with `reason: session-end`), `discarded_by`.
+- `pauses`: `after_segment`, the pause and resume events, when capture
+  stopped and restarted (QPC), and the `seconds` nothing was recorded.
+- `summary`: `segments`, `takes`, `takes_discarded`, `kept_s`, `total_s`,
+  `whole` (no take at all: keep everything), and `kept`: the intervals to
+  keep, `[{segment, start_s, end_s, take}]`.
+- `marks` keep B's shape, plus `segment`, `media_s` and `event`. A mark's
+  `flash` is now its fiducial: a patch (`style: patch`) unless `mark_style =
+  "full"`.
+
+*Migration:* `/1` sidecars still load. Readers call `catalog.as_v2()`, which
+presents one as a single segment with no takes (the whole recording kept);
+the file itself is never rewritten.
+
 **The catalog** lets `ls`, `last` and `rename` work without walking folders.
 Each recording has a `uid` that survives renames.
 
 ## How a recording works
 
 1. The name is taken from the foreground window (or your slug) and a
-   collision-free stem is picked. The sidecar is written straight away, which
-   reserves the stem.
+   collision-free stem is picked (free in the folder, ignoring case, and in
+   the catalog). The sidecar is created straight away, refusing to replace
+   anything, which reserves the stem.
 2. One capture child per audio source starts (see [Audio](#audio)), then
    ffmpeg starts into `<stem>.recording.mkv`. If the pipeline fails during
    start-up, the next one in `video.fallback` is tried, and you are told; the
@@ -221,6 +345,10 @@ Each recording has a `uid` that survives renames.
    front). The capture container is Matroska because a capture cut short by
    a crash is still playable. If ffmpeg dies mid-recording, the partial
    `.mkv` is kept and catalogued as failed.
+6. A pause (C1a) runs steps 4–5 for the current segment, catalogues the
+   recording so far, and waits. Resume runs steps 2–5 again into
+   `<stem>.seg<k>.recording.mkv`. If a later segment fails, the earlier
+   ones still make the recording, and you are told.
 
 The video pipelines were measured on this laptop (ffmpeg 9.0.2, Intel Arc
 140V), with colours read back from captured frames:
@@ -346,6 +474,7 @@ duration_ms = 200          # 150 measured 4-5 frames; raised for margin after th
 [agent]
 record_hotkey = "Ctrl+Alt+R"
 pill_position = "top-right"
+take_hotkey = "Ctrl+Alt+T"     # also pause_hotkey, retake_hotkey; debounce_ms = 1000
 ```
 
 If Windows renumbers the mic (the `(6- ...)` part), an empty `audio.device`
@@ -378,6 +507,16 @@ fallback with a reused child, a failing or crashing child, the clap, and a
 stalled PCM writer that must not hang the stop. The COM calls themselves
 run only on Windows: the A.1 probes exercised them on the laptop, and the
 checklist below covers them.
+
+Session C1a added four test files. `test_events.py` drives the event state
+machine through every take / retake / pause / resume sequence, the debounce
+and the kept/total arithmetic. `test_segments.py` records real
+multi-segment sessions through `fake_ffmpeg.py`. `test_naming_audit.py`
+checks every naming path against a case-insensitive fake folder and the
+catalog, plus both sidecar versions. `test_c1a_surface.py` covers the chords,
+the pill, the dialog, the WSL commands and the reproduction of the
+2026-10-06 naming report. The Tk windows themselves (the patch, the
+dialog's preview line) need a desktop: smoke steps 51–58.
 
 ## Smoke-test checklist (real capture path, on the laptop)
 
@@ -537,6 +676,55 @@ marked ★ are the open questions the build could not answer itself.
     valid values, and `config.toml` is unchanged. `peep config get` lists
     every key, marking the ones set in the file.
 
+### Pause, takes and naming (session C1a)
+
+50. Run `peep agent restart` (it syncs and loads the new code). `peep agent
+    status` should list six hotkeys `registered`: record, mark, discard,
+    pause (`Ctrl+Alt+P`), take (`Ctrl+Alt+T`) and retake
+    (`Ctrl+Alt+Backspace`). The C1a probe found P, T and Backspace free on
+    this laptop (and `Ctrl+Alt+E` taken by another app).
+51. **Takes.** Press Ctrl+Alt+R, talk for 5 s, press **Ctrl+Alt+T**: a blue
+    square flashes bottom-left and the pill shows `◉ take 1`. Talk, press
+    Ctrl+Alt+T: a red square, `○ 1 take`. Press Ctrl+Alt+R. The dialog's
+    status line reads `1 take · 00:0x kept of 00:xx`. In the sidecar,
+    `events` has an open and a close, and `summary.kept` one interval.
+52. **Retake.** Record; open a take; say a line badly; press
+    **Ctrl+Alt+Backspace**: a yellow square, the pill still `◉ take 1`
+    (take 1 discarded, take 2 open). Close it with Ctrl+Alt+T, then press
+    retake again (redo the take just finished). The sidecar's `takes` should
+    read discarded, discarded, kept…, and `summary.takes_discarded` 2.
+53. **Debounce.** Double-tap Ctrl+Alt+T quickly: one patch, the pill opens
+    only one take, and the sidecar shows the second press with `ignored:
+    debounce`. Wait a second and press again: it closes.
+54. **Patches in the video.** Step through the recording from step 51 at the
+    take presses: about 6 frames with a solid blue (then red, yellow) square
+    in the bottom-left corner, 200×200 at 2560×1600, and **no** pill in any
+    frame. The colours ★ were not measured through the pipeline: note what
+    the frames show (expect about (0,0,254), (254,0,0), (254,254,0)).
+55. **Pause across the dialog.** Record, open a take, press **Ctrl+Alt+P**:
+    a green flash, then the pill turns orange, `❚❚ PAUSED 00:0x ◉ take 1`,
+    standing still. Wait 30 s (the bathroom break). `peep ls` already lists
+    the recording. Press Ctrl+Alt+P again: a magenta flash, the pill counts
+    on from where it stopped. Close the take, stop with Ctrl+Alt+R. The
+    dialog shows `… · 2 segments`. Save under a new name: both
+    `<name>.mp4` and `<name>.seg2.mp4` (and the `.json`) are renamed.
+56. **Pause from WSL.** `peep rec demo`, then in another tab `peep pause`
+    (it prints `paused after segment 1 …`), `peep take` (`◉ take: 1 take(s),
+    the last one open (paused: …)`), `peep resume`, `peep take`, then q in
+    the first tab. The sidecar's take opens at the start of segment 2.
+57. ★ **Pause timing.** Note how long the pause takes (stop flash to the
+    orange pill: the remux of the segment so far) and the resume (Ctrl+Alt+P
+    to the magenta flash). Both should be a couple of seconds.
+58. **Naming.** Record twice from the same browser tab into one collection.
+    The second dialog prefills `…-2` (before C1a it showed the first file's
+    name, which is what looked like an overwrite on 2026-10-06), and typing
+    the first one's name shows `saves as …-2 (… is taken, so a counter is
+    added)`. Enter keeps `-2`; the first file is untouched.
+59. **Naming, case and the catalog.** Rename a file in Explorer to change
+    only its capitals (`…-Demo.mp4`), then `peep rename last demo`: it gets
+    a counter and says so. `peep rename last con` is refused (`CON is a
+    device name Windows reserves`).
+
 ## Troubleshooting
 
 - **`python.exe` opens the Microsoft Store, or isn't found:** run
@@ -555,6 +743,10 @@ marked ★ are the open questions the build could not answer itself.
 - **Voice early or late:** it should not be with the default WASAPI mic.
   If you measure a constant offset, `peep config set audio.offset_ms N`
   (positive delays the audio) and note it for session C.
+- **A take or pause press seemed to do nothing:** a second press within a
+  second of the first is ignored on purpose (debounce, `· take ignored` on
+  the status line, `ignored: debounce` in the sidecar). `[agent]
+  debounce_ms` changes it.
 - **A hotkey does nothing:** `peep agent status` says whether the agent is
   running and whether each chord registered. A chord another app holds
   shows `FAILED: Ctrl+Alt+R is already taken`; pick another in `[agent]`.

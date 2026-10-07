@@ -21,7 +21,8 @@ Windows side. What the shim does itself:
   * doctor    shim-side checks (python.exe, installed copy, PATH) before
               the Windows-side doctor
 
-Commands: rec, stop, mark, ls, open, rename, doctor, config, paths, agent, install, help.
+Commands: rec, stop, mark, pause, resume, take, retake, ls, open, rename, doctor, config, paths, agent,
+install, help.
 Environment: PEEP_PYTHON (default python.exe), PEEP_NO_AUTOSYNC=1,
 PEEP_REC_NO_SETSID=1 (keep `rec`'s child in this terminal's session).
 
@@ -53,7 +54,8 @@ from pathlib import Path
 REPO = Path(os.path.realpath(__file__)).parent.parent
 WIN_SRC = REPO / "win"
 APP_MARKER = "INSTALLED.json"
-WIN_COMMANDS = ("rec", "stop", "mark", "ls", "open", "rename", "doctor", "config", "paths", "agent")
+WIN_COMMANDS = ("rec", "stop", "mark", "pause", "resume", "take", "retake", "ls", "open", "rename", "doctor",
+                "config", "paths", "agent")
 USAGE = """\
 usage: peep <command> [args]
 
@@ -62,7 +64,10 @@ usage: peep <command> [args]
                           record until q / Enter / Ctrl-C here, or `peep stop` from another shell
                           (audio: computer audio by default; config audio.sources sets the default)
   stop                    stop the running recording and wait for the file
-  mark [--label TEXT]     drop a mark (cyan flash + sidecar entry) in the running recording
+  mark [--label TEXT]     drop a mark (cyan corner patch + sidecar entry) in the running recording
+  pause / resume          hard pause: capture stops (the segment is saved); resume starts the next segment
+  take                    open a take, or close the open one (only takes survive the cut)
+  retake                  discard the most recent take and open a fresh one now
   ls [--collection NAME] [--all] [--json]
   open [last|STEM] [--folder]
   rename last NAME [--collection NAME]
@@ -76,7 +81,8 @@ usage: peep <command> [args]
 
   agent install           start the hotkey agent at every login (and now); agent uninstall undoes it
   agent start|stop|restart|status|reload
-                          Ctrl+Alt+R record/stop (then name it), Ctrl+Alt+M mark, Ctrl+Alt+X discard
+                          Ctrl+Alt+R record/stop (then name it), Ctrl+Alt+M mark, Ctrl+Alt+X discard,
+                          Ctrl+Alt+P pause/resume, Ctrl+Alt+T take, Ctrl+Alt+Backspace retake
                           (every peep command syncs the Windows copy first; `agent restart` loads it)
 """
 

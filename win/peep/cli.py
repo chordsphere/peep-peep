@@ -6,6 +6,9 @@ run directly from any Windows console.
              [--scale WxH|native] [--encoder qsv|qsv-download|x264] [--fps N] [--stdin-stop line|off]
   stop [--no-wait] [--timeout S]
   mark [--label TEXT]              drop a mark in the running recording (session B)
+  pause [--no-wait] | resume [--no-wait]
+                                   hard pause: capture stops; resume opens the next segment (C1a)
+  take | retake                    open/close a take; discard the last take and open a fresh one (C1a)
   agent VERB                       the resident hotkey agent; see agentcli.py (session B)
   ls [--collection C] [--limit N] [--all] [--json]
   open [REF] [--folder]            REF: last (default), a stem, or a uid prefix
@@ -33,6 +36,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from . import __version__, agentcli, catalog, config as config_mod, configedit, naming, paths
@@ -71,8 +75,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-wait", action="store_true", help="return as soon as the request is written")
     s.add_argument("--timeout", type=float, default=60.0, help="seconds to wait for the file to finalize")
 
-    m = sub.add_parser("mark", help="drop a mark (cyan flash + sidecar entry) in the running recording")
+    m = sub.add_parser("mark", help="drop a mark (cyan corner patch + sidecar entry) in the running recording")
     m.add_argument("--label", "-l", default="", help="optional text stored with the mark")
+
+    for name, text in (("pause", "hard pause: capture stops and this segment is saved; `peep resume` continues"),
+                       ("resume", "resume a paused recording: a new segment of the same recording starts")):
+        pr = sub.add_parser(name, help=text)
+        pr.add_argument("--no-wait", action="store_true", help="return as soon as the request is written")
+        pr.add_argument("--timeout", type=float, default=60.0, help="seconds to wait for it to take effect")
+    sub.add_parser("take", help="open a take, or close the open one (only takes survive the cut)")
+    sub.add_parser("retake", help="discard the most recent take (open or closed) and open a fresh one now")
 
     ls = sub.add_parser("ls", help="list recordings from the catalog")
     ls.add_argument("--collection", "-c")
@@ -240,6 +252,68 @@ def cmd_mark(args, cfg) -> int:
     return 0
 
 
+def cmd_pause_resume(args, cfg) -> int:
+    """`peep pause` / `peep resume` (session C1a), for terminal recordings and any
+    other: the same control-file request the agent's pause chord writes."""
+    ctl = _control()
+    kind = args.command
+    try:
+        info = ctl.request_event(kind, "cli")
+    except LookupError as exc:
+        _err(str(exc))
+        return 1
+    if args.no_wait:
+        _out(f"{kind} requested")
+        return 0
+    want = ("paused",) if kind == "pause" else ("recording",)
+    got = ctl.wait_status(int(info["pid"]), want, args.timeout)
+    if got is None:
+        now = ctl.read_active()
+        if now is None:
+            _err(f"the recording ended before it could {kind}")
+        else:
+            _err(f"{kind} requested, but the recording is still '{now.get('status')}' after {args.timeout:g}s "
+                 f"(already {'paused' if kind == 'pause' else 'recording'}? see the log)")
+        return 1
+    if kind == "pause":
+        _out(f"❚❚ paused after segment {got.get('segment')} ({format_duration(got.get('captured_s'))} captured, "
+             f"saved). `peep resume` continues; `peep stop` ends the recording.")
+    else:
+        _out(f"● recording again: segment {got.get('segment')}")
+    return 0
+
+
+def cmd_take(args, cfg, wait_s: float = 3.0) -> int:
+    """`peep take` / `peep retake` (session C1a). Once the recorder has consumed
+    the request (it polls every 100 ms), reports the take count it published."""
+    ctl = _control()
+    kind = args.command
+    try:
+        req = ctl.request_event(kind, "cli")
+    except LookupError as exc:
+        _err(str(exc))
+        return 1
+    pid, path = int(req["pid"]), ctl.dir / req["file"]
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline and path.exists():
+        time.sleep(0.05)
+    if path.exists():
+        _out(f"{kind} requested (the recorder has not picked it up yet; it will)")
+        return 0
+    time.sleep(0.15)                     # the recorder publishes the count right after it acts
+    now = ctl.read_active() or {}
+    if int(now.get("pid", 0)) != pid:
+        _out(f"{kind} requested (the recording has ended meanwhile)")
+        return 0
+    if now.get("status") in ("paused", "pausing", "resuming"):
+        where = " (paused: it takes effect at the segment boundary)"
+    else:
+        where = ""
+    state = "open" if now.get("take_open") else "closed"
+    _out(f"{'↺ retake' if kind == 'retake' else '◉ take'}: {now.get('takes', 0)} take(s), the last one {state}{where}")
+    return 0
+
+
 def format_duration(seconds) -> str:
     if not isinstance(seconds, (int, float)):
         return "?"
@@ -293,8 +367,10 @@ def cmd_open(args, cfg) -> int:
 
 
 def cmd_rename(args, cfg) -> int:
-    entry = catalog.rename(cfg.root_path(), args.ref, args.name, args.collection)
-    _out(f"renamed → {entry.media_path(cfg.root_path())}")
+    live = _control().live_recording() or {}
+    entry = catalog.rename(cfg.root_path(), args.ref, args.name, args.collection, live_uid=live.get("uid"))
+    _out(f"renamed → {entry.media_path(cfg.root_path())}"
+         + ("  (that name was taken, so it got a counter)" if entry.suffixed else ""))
     return 0
 
 
@@ -362,7 +438,8 @@ def cmd_paths(args, cfg) -> int:
     return 0
 
 
-COMMANDS = {"rec": cmd_rec, "stop": cmd_stop, "mark": cmd_mark, "ls": cmd_ls, "open": cmd_open,
+COMMANDS = {"rec": cmd_rec, "stop": cmd_stop, "mark": cmd_mark, "pause": cmd_pause_resume,
+            "resume": cmd_pause_resume, "take": cmd_take, "retake": cmd_take, "ls": cmd_ls, "open": cmd_open,
             "rename": cmd_rename, "doctor": cmd_doctor, "config": cmd_config, "paths": cmd_paths,
             "agent": agentcli.cmd_agent}
 
