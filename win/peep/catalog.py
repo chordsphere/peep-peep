@@ -31,6 +31,13 @@ Sections:
   3. Catalog events + fold      (~line 250)
   4. Rename                     (~line 390)
   5. Discard                    (~line 520)
+  6. The render lock (C1b)      (~line 570)
+
+Session C1b: the cut (`<stem>.cut.mp4`) lives in the recording's namespace,
+so rename moves it and discard deletes it with everything else; the
+sidecar's `render` block follows a rename. While a render holds the
+recording's lock (`<stem>.cut.lock`), rename and discard refuse, because
+ffmpeg is still writing into the family.
 """
 
 from __future__ import annotations
@@ -418,6 +425,7 @@ def plan_rename(root: Path, ref, new_name: str, collection: str | None = None,
     cat = cat or Catalog(root)
     entry = resolve_ref(cat, ref)
     refuse_if_live(entry, live_uid, "rename")
+    refuse_if_rendering(root, entry, "rename")
     slug = naming.slug_from_user(new_name)
     dest_collection = naming.validate_collection(collection) if collection else entry.collection
     if not entry.file:
@@ -497,6 +505,10 @@ def rename(root: Path, ref: str, new_name: str, collection: str | None = None,
             for key in ("file", "capture_file"):
                 if isinstance(seg.get(key), str) and naming.stem_of(seg[key]).casefold() == plan.src_stem.casefold():
                     seg[key] = plan.stem + seg[key][len(plan.src_stem):]
+        render = data.get("render")
+        if isinstance(render, dict) and isinstance(render.get("file"), str) \
+                and naming.stem_of(render["file"]).casefold() == plan.src_stem.casefold():
+            render["file"] = plan.stem + render["file"][len(plan.src_stem):]      # the cut moved with it
         write_sidecar(dest_side, data)
     else:
         event(log, logging.WARNING, "sidecar.missing", media=str(src_media))
@@ -529,6 +541,7 @@ def discard(root: Path, ref: str, reason: str = "user", live_uid: str | None = N
     cat = Catalog(root)
     entry = resolve_ref(cat, ref)
     refuse_if_live(entry, live_uid, "discard")
+    refuse_if_rendering(root, entry, "discard")
     targets: list[Path] = []
     if entry.file:
         media = entry.media_path(root)
@@ -552,3 +565,92 @@ def _resolve_uid(cat: Catalog, uid: str) -> Entry:
         if e.uid == uid:
             return e
     raise LookupError(f"no recording with uid {uid}")
+
+
+# ---------------------------------------------------------------------------
+# 6. The render lock (session C1b)
+# ---------------------------------------------------------------------------
+
+RENDER_LOCK_SUFFIX = ".cut.lock"
+STALE_UNREADABLE_LOCK_S = 30.0
+
+
+def render_lock_path(folder: Path, stem: str) -> Path:
+    return Path(folder) / f"{stem}{RENDER_LOCK_SUFFIX}"
+
+
+def _pid_alive(pid) -> bool:
+    from .winapi import pid_alive
+    return pid_alive(int(pid))
+
+
+def render_holder(folder: Path, stem: str, pid_alive=None) -> dict | None:
+    """The live render of this recording ({"pid", "started_at"}), or None. A lock
+    whose process is gone is stale and does not count; one that cannot be read
+    (being written this instant) counts until it is STALE_UNREADABLE_LOCK_S old."""
+    p = render_lock_path(folder, stem)
+    pid_alive = pid_alive or _pid_alive
+    try:
+        info = json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        try:
+            young = (_dt.datetime.now().timestamp() - p.stat().st_mtime) < STALE_UNREADABLE_LOCK_S
+        except OSError:
+            return None
+        return {"pid": None, "unreadable": True} if young else None
+    pid = info.get("pid")
+    return info if isinstance(pid, int) and pid_alive(pid) else None
+
+
+def refuse_if_rendering(root: Path, entry: Entry, doing: str) -> None:
+    if not entry.file:
+        return
+    media = entry.media_path(root)
+    holder = render_holder(media.parent, naming.stem_of(media.name))
+    if holder is not None:
+        raise RecordingInProgress(f"{entry.file} is being rendered (pid {holder.get('pid') or '?'}); "
+                                  f"{doing} it when the render has finished")
+
+
+@dataclass
+class RenderLock:
+    path: Path
+    pid: int
+
+
+def acquire_render_lock(folder: Path, stem: str, pid_alive=None) -> RenderLock:
+    """Take the recording's render lock, created exclusively. A stale lock (its
+    process is gone: a crash, a killed agent) is removed, loudly, and taken.
+    Raises RecordingInProgress when a live render holds it."""
+    p = render_lock_path(folder, stem)
+    for _ in range(2):
+        try:
+            with p.open("x", encoding="utf-8", newline="\n") as fh:
+                json.dump({"pid": os.getpid(), "started_at": now_iso()}, fh)
+            event(log, logging.INFO, "render.lock", path=str(p))
+            return RenderLock(p, os.getpid())
+        except FileExistsError:
+            holder = render_holder(folder, stem, pid_alive)
+            if holder is not None:
+                raise RecordingInProgress(f"{stem} is already being rendered (pid {holder.get('pid') or '?'})")
+            event(log, logging.WARNING, "render.stale_lock_removed", path=str(p))
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
+    raise RecordingInProgress(f"could not take the render lock {p}")
+
+
+def release_render_lock(lock: RenderLock) -> None:
+    try:
+        info = json.loads(lock.path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        event(log, logging.WARNING, "render.lock_unreadable_on_release", path=str(lock.path), error=repr(exc))
+        return
+    if info.get("pid") == lock.pid:
+        try:
+            lock.path.unlink()
+        except OSError as exc:
+            event(log, logging.WARNING, "render.unlock_failed", path=str(lock.path), error=repr(exc))

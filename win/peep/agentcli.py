@@ -99,6 +99,11 @@ def status_lines(info: dict | None, disk_code: str | None, link: str | None, lin
         lines.append(f"  installed copy  {inst.get('state', '?')}: {inst.get('detail', '')}".rstrip())
         if disk_code and info.get("code") and disk_code != info.get("code"):
             lines.append("  code            the running agent is older than the installed copy: peep agent restart")
+        rend = info.get("render")
+        if isinstance(rend, dict):                 # session C1b: the background render in progress
+            pct = rend.get("progress")
+            lines.append(f"  rendering       {rend.get('name')} ({rend.get('stage') or 'starting'}"
+                         + (f", {int(pct * 100)}%" if isinstance(pct, (int, float)) else "") + ")")
     if recording is not None:
         lines.append(f"recording: {recording.get('status', 'recording')} → {recording.get('final')}"
                      f" (started by {recording.get('origin', 'terminal')})")
