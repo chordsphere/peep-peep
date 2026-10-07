@@ -11,6 +11,7 @@ Ctrl+Alt+R               # in any app: magenta flash, REC pill, recording starts
                          #  Ctrl+Alt+P pauses: see "Editing while you record")
 Ctrl+Alt+R               # green flash; a dialog asks for the name
 bale pack demo ⏎         # typed over the suggested name; Enter saves. Done.
+                         # (in the background: <name>.cut.mp4, the edited cut, appears beside it)
 ```
 
 or, from a terminal:
@@ -40,8 +41,9 @@ no longer leads the picture, and `peep config set` so the config never needs
 a text editor. See [Audio](#audio). **Session C1a** (landed) is the capture
 side of editing: hard pause as segments of one recording, takes and retakes
 recorded as events, corner-patch fiducials, and a naming audit. **Session
-C1b** renders from that record (cut to takes, concatenate segments). See
-[Editing while you record](#editing-while-you-record).
+C1b** (landed) renders from that record: the cut, `<stem>.cut.mp4`, beside the
+original, which is never modified. See [Editing while you record](#editing-while-you-record)
+and [The cut](#the-cut-session-c1b).
 
 ## Install
 
@@ -81,7 +83,7 @@ points at `pythonw.exe %LOCALAPPDATA%\peep\app\peepw.py`.
 
 | Command | What it does |
 |---|---|
-| `peep rec [slug] [-c NAME]` | Record the screen and the computer's audio. Stop with **q**, **Enter** or **Ctrl-C** in that terminal, or `peep stop` from another. With no slug the name comes from the foreground window (from a terminal at `~/peep-peep` that is `terminal-peep-peep`). Options: `--audio system\|mic\|both\|none` (this recording only; the default is `audio.sources`), `--no-mic` (takes the mic out: both → system, mic → none), `--no-flash`, `--scale 1920x1200`, `--encoder qsv\|qsv-download\|x264`, `--fps N`. |
+| `peep rec [slug] [-c NAME]` | Record the screen and the computer's audio. Stop with **q**, **Enter** or **Ctrl-C** in that terminal, or `peep stop` from another. With no slug the name comes from the foreground window (from a terminal at `~/peep-peep` that is `terminal-peep-peep`). Options: `--audio system\|mic\|both\|none` (this recording only; the default is `audio.sources`), `--no-mic` (takes the mic out: both → system, mic → none), `--no-flash`, `--scale 1920x1200`, `--encoder qsv\|qsv-download\|x264`, `--fps N`. After `✓ saved` it renders the cut in that terminal, printing progress (`render.auto`); `--no-render` skips that. |
 | `peep stop` | Ask the running recording to stop and wait until its file is finalized; prints the path. `--no-wait` returns immediately. |
 | `peep mark [--label TEXT]` | Drop a mark in the running recording (a cyan corner patch + an entry in the sidecar's `marks`). Same as **Ctrl+Alt+M**. |
 | `peep pause` / `peep resume` | Hard pause: capture stops and the segment is saved; resume starts the next segment of the same recording. Each waits until it has happened (`--no-wait` doesn't). Same as **Ctrl+Alt+P**. |
@@ -89,8 +91,9 @@ points at `pythonw.exe %LOCALAPPDATA%\peep\app\peepw.py`.
 | `peep retake` | Discard the most recent take (open or closed) and open a fresh one now. Same as **Ctrl+Alt+Backspace**. |
 | `peep agent install\|uninstall` | Add (and start) or remove the hotkey agent's Startup-folder entry. |
 | `peep agent start\|stop\|restart\|status\|reload` | Control the running agent; see below. |
-| `peep ls [-c NAME] [--all] [--json]` | List recordings from the catalog (newest last). `--all` includes failed captures. |
-| `peep open [last\|STEM] [--folder]` | Open with the Windows default player, or show it in Explorer. |
+| `peep render [last\|STEM] [--force] [--dry-run]` | Render the cut, `<stem>.cut.mp4`, from the recording's event record (session C1b; see [The cut](#the-cut-session-c1b)). An up-to-date cut is left alone unless `--force`. `--dry-run` finds every flash and patch, places every seam, and prints the plan and the ffmpeg command without writing anything. A failed render says why, leaves the original untouched, and running it again retries. |
+| `peep ls [-c NAME] [--all] [--json]` | List recordings from the catalog (newest last). `--all` includes failed captures. Each one shows what editing it has: `[2 seg · 3 takes · cut]` (or `cut (stale)`, `render failed`, `rendering`). |
+| `peep open [last\|STEM] [--raw] [--folder]` | Open with the Windows default player, or show it in Explorer. It plays the cut when there is a current one; otherwise the original, and a recording of several segments that has no cut yet plays as a playlist of every segment in order. `--raw` plays the original (segment 1). |
 | `peep rename last NAME [-c NAME]` | Rename (the date prefix stays), optionally moving it to another collection. The sidecar and every segment move with it. A name that is taken gets a counter, and the command says so. |
 | `peep doctor [--capture]` | Check Python, ffmpeg, ddagrab/dshow, encoders, the audio devices (with a 1.5 s loopback capture while a short test tone plays), the storage root and tkinter. It never installs anything. |
 | `peep config [--init]` | Show the effective config, or write a commented template. |
@@ -113,7 +116,7 @@ no tray icon; the REC pill and short on-screen messages are its only UI.
 
 | Hotkey | Does |
 |---|---|
-| **Ctrl+Alt+R** | Not recording: start, named after the window you are in at the keypress, in the last-used collection. Recording: stop, then the naming dialog. |
+| **Ctrl+Alt+R** | Not recording: start, named after the window you are in at the keypress, in the last-used collection. Recording: stop, then the naming dialog; once it is answered (Enter or Esc), the cut renders in the background. |
 | **Ctrl+Alt+M** | Drop a mark: a cyan corner patch (captured, for session C) and an entry in the sidecar's `marks`. |
 | **Ctrl+Alt+X** | Stop and delete the take: file and sidecar are removed, and the catalog records it as `discarded`. |
 | **Ctrl+Alt+P** | Hard pause / resume (session C1a). |
@@ -175,9 +178,10 @@ starts WSL to find out.
 
 ## Editing while you record
 
-Session C1a records *what to keep*; session C1b will cut it. Nothing you
-press while recording can lose footage: the session is always captured
-whole, and the cuts are decided at render from the events below.
+Session C1a records *what to keep*; session C1b cuts it (the cut,
+`<stem>.cut.mp4`). Nothing you press while recording can lose footage: the
+session is always captured whole, the original is never modified, and the
+cuts are decided at render from the events below.
 
 | | Chord | WSL | What it means |
 |---|---|---|---|
@@ -219,15 +223,135 @@ inbox\2026-10-06-terminal-peep-peep.mp4        segment 1 (the catalog points her
 inbox\2026-10-06-terminal-peep-peep.seg2.mp4   segment 2
 inbox\2026-10-06-terminal-peep-peep.seg3.mp4   segment 3
 inbox\2026-10-06-terminal-peep-peep.json       one sidecar: the segments and every event
+inbox\2026-10-06-terminal-peep-peep.cut.mp4    the cut (session C1b): the segments joined, the takes kept
 ```
 
 Each segment is remuxed to MP4 when it ends, so a paused recording is
 already safe: it is in the catalog and on disk while you are away. `peep
-open` plays segment 1; C1b concatenates the segments. A recording that was
+open` plays the cut once it exists, and every segment in order (a playlist)
+until then. A recording that was
 never paused has exactly the files it had before. While a recording is live
 (recording or paused) it cannot be renamed or discarded from the CLI: `peep
 rename last …` says so and does nothing, since the next segment is still to
 be written under its name. Rename it after it stops.
+
+## The cut (session C1b)
+
+Every recording gets a cut beside it, `<stem>.cut.mp4`, rendered from the
+event record. The original files are never modified; the cut is a new file
+in the recording's own name family, so `peep rename` moves it along and
+discard deletes it with the rest.
+
+**What the cut contains**, in order:
+
+1. **Every segment that finished cleanly, joined.** A pause is a join.
+2. **Each segment trimmed to its own flashes.** The cut starts at the first
+   frame after the last magenta frame and ends at the last frame before the
+   first green one. No warm-up, no flash, no clap tone: the tone plays during
+   the magenta.
+3. **Only the takes**, when there are takes (`summary.kept`); with no take
+   at all, everything. Each take's corner patches (blue, red, yellow) are
+   excluded with the material outside the take.
+4. **Clean seams.** At every take edge and every join:
+   - **Silence trim.** Silence is trimmed off the kept side, keeping
+     `silence_keep_ms` (250 ms) of it before the first sound and after the
+     last, and at most `silence_max_trim_ms` (1 s). A take that is silent
+     from start to end is never trimmed for silence.
+   - **Snap.** Where there is no silence to trim, the seam moves to the
+     quietest 10 ms within `snap_ms` (300 ms).
+   - **Crossfade.** The picture cuts hard on a frame; the audio crossfades
+     over `crossfade_ms` (40 ms), centred on the cut, so it stays exactly as
+     long as the picture.
+5. **Marks become chapters** (the player's chapter list), titled with their
+   label or `mark N`. A mark is never a cut. Its cyan corner patch is hidden
+   instead: for those ~200 ms the corner shows what it showed the frame
+   before. A patch right at a take's edge is cut off that edge instead, since
+   the material beside it is excluded anyway. A mark pressed while paused
+   starts a chapter at the resume.
+
+No fiducial colour reaches the cut. A take pressed during a flash still
+starts after the magenta and ends before the green, whatever its own patch
+says.
+
+**A zero-press recording** (no take, no pause) is simply the original
+trimmed to its flashes: about 1 s of warm-up and the flashes are gone,
+nothing else changes.
+
+**How the boundaries are found.**
+- **Read from the video.** Every flash and patch is looked for in the video
+  itself, within `search_s` (1 s) of where the sidecar says it was shown: a
+  thumbnail of the frame for flashes, a median of the patch's rect for
+  patches.
+- **Falling back to the stamp.** If one cannot be found (the corner already
+  showed that colour, or a frame decode failed), the sidecar's stamp is used
+  instead, erring toward cutting a little more. This is never silent: the
+  render's output says `N fallback(s)`, the log has a
+  `render.boundary_fallback` warning, and the sidecar's `render` block
+  records the reason.
+- **Inspecting a render.** `peep render --dry-run` shows every boundary,
+  detected or not, before anything is written.
+
+**The output** keeps the original's resolution, frame rate and audio tracks:
+one mixed track, or two titled tracks with `mix = "separate"`. It uses the
+original's encoder settings, `-movflags +faststart`, and chapters.
+- **Speed.** The render is a full re-encode through A's encoder choice
+  (`h264_qsv`). On this laptop the probe measured ~6x real time at
+  2560x1600, so a 10-minute recording takes ~1.5 minutes.
+- **QSV fallback.** If QSV fails, the render is redone with libx264 (~2.5x
+  real time), and says so.
+- **Priority.** ffmpeg runs at below-normal priority, so a recording started
+  meanwhile is not starved.
+
+**When it renders** (`render.auto`):
+- **Agent recordings** render in the background, after the dialog's Enter
+  or Esc, or right after the stop with `dialog = false`. A toast says when
+  it starts and when the cut is ready. You can start a new recording at
+  once; renders queue, one at a time. `peep agent status` shows the progress.
+- **Terminal recordings** (`peep rec`) render in that terminal after
+  `✓ saved`, printing progress, however the recording was stopped (q,
+  Enter, Ctrl-C, `peep stop`, Ctrl+Alt+R). `peep rec --no-render` skips it.
+- **The setting.** `render.auto = "takes"` renders only recordings with
+  takes or pauses; `"never"` leaves it to `peep render`.
+- **Failures.** A render that fails leaves the original untouched, shows
+  why (a toast, or the terminal), and `peep render` retries it.
+
+**`peep open`** plays the cut when it is current. Current means it was
+rendered from the sidecar's present event record and is the size the render
+recorded. Otherwise `peep open` plays the original and says why the cut was
+not used. `--raw` always plays the original.
+
+**The sidecar's `render` block** records everything the render decided:
+- **The run.** `status` and `file`; when it ran and how long it took; the
+  `source_digest` it was made from (segments, events, takes and marks, but
+  not file names, so a rename keeps the cut current); and the `[render]`
+  settings used.
+- **Boundaries.** Each one, with its stamp and what was detected: the first
+  and last frame, the measured colour, the difference in ms, or the
+  fallback and why.
+- **Seams.** Each one, with its offset and how it was placed: `silence`,
+  `silence-max`, `snap` or `none`.
+- **Joins and marks.** The crossfades, the chapters, the concealed mark
+  patches, and the marks that fell in cut material.
+- **Leftovers.** Dropped pieces and every fallback, in words.
+- **The output.** Its duration, size, sha256, encoder and argv, plus each
+  encode attempt.
+- **`calibration`.** The clap's A/V residual per segment: the 1 kHz onset
+  against the first magenta frame, minus what the stamps predicted. It is
+  measured and recorded; `av_calibration = "apply"` also corrects it when
+  it exceeds a frame.
+
+```toml
+[render]
+auto = "always"            # always | takes | never
+search_s = 1.0             # look for each flash / patch this far either side of its stamp
+snap_ms = 300              # move a seam up to this far into the kept side, to the quietest 10 ms
+crossfade_ms = 40          # audio crossfade at every join
+silence_db = -45.0         # quieter than this (10 ms RMS, dBFS) is silence
+silence_max_trim_ms = 1000 # at most this much silence trimmed per edge; 0 = never
+silence_keep_ms = 250      # silence kept before the first sound / after the last
+min_interval_ms = 250      # a piece shorter than this after trimming is dropped (and said so)
+av_calibration = "measure" # measure | apply | off
+```
 
 ## Where files land
 
@@ -257,7 +381,9 @@ a root.
 
 **Nothing is ever overwritten (session C1a).** A recording's files all start
 with its stem: `<stem>.mp4`, `.seg<k>.mp4`, `.json`, and `.cut.mp4` and the
-rest of the `.cut.*` family, reserved for C1b's renders. A stem is free only
+rest of the `.cut.*` family (C1b: the cut, and while it renders
+`.cut.part.mp4`, `.cut.part.ffmeta` and the `.cut.lock` that keeps a rename
+or discard away until it is done). A stem is free only
 if no file in the folder starts with it (compared ignoring case, as Windows
 does) and the catalog lists no recording with it, even one whose file has
 gone. Otherwise the next counter is used: for `peep rec`, the hotkey, `peep
@@ -316,6 +442,9 @@ describe segment 1, so a one-segment recording reads exactly as before.
 - `marks` keep B's shape, plus `segment`, `media_s` and `event`. A mark's
   `flash` is now its fiducial: a patch (`style: patch`) unless `mark_style =
   "full"`.
+- `render` (session C1b): what the last render decided and produced; see
+  [The cut](#the-cut-session-c1b). A `/1` sidecar gets the block too and
+  stays `/1`.
 
 *Migration:* `/1` sidecars still load. Readers call `catalog.as_v2()`, which
 presents one as a single segment with no takes (the whole recording kept);
@@ -517,6 +646,29 @@ catalog, plus both sidecar versions. `test_c1a_surface.py` covers the chords,
 the pill, the dialog, the WSL commands and the reproduction of the
 2026-10-06 naming report. The Tk windows themselves (the patch, the
 dialog's preview line) need a desktop: smoke steps 51–58.
+
+Session C1b added five test files and `tests/render_fixtures.py`, which
+builds recordings through the real `EventModel` and describes their media as
+a scene. `fake_ffmpeg.py` synthesises the analysis output from that scene:
+frames with the flashes and patches where a capture puts them, and audio
+with the clap and "speech" tones.
+- `test_render_plan.py`: the plan for every event shape and both sidecar
+  versions.
+- `test_render_detect.py`: detection, fallbacks, seam snapping and silence
+  trimming against synthetic frames and PCM, the clap onset, and resolve().
+- `test_render_argv.py`: the filtergraph and argv as pure functions,
+  including the invariant that the cut's audio is exactly as long as its
+  picture.
+- `test_render_run.py`: the renderer across the process boundary: failures,
+  the x264 retry, cancel, the lock, rename and discard. Its one real-ffmpeg
+  test runs where WSL has an ffmpeg with libx264 and the filters the cut uses
+  (otherwise it skips and says what is missing): it frame-counts the cut and
+  scans it for fiducial colours, in a child process
+  (`tests/real_ffmpeg_scenario.py`) with stdin on /dev/null, in a session of
+  its own and killed at 120 s; every ffmpeg it starts says `-nostdin`. It
+  takes about 4 s.
+- `test_render_surface.py`: the queue, the agent's background renders (a
+  recording started mid-render included), the CLI, the shim and the config.
 
 ## Smoke-test checklist (real capture path, on the laptop)
 
@@ -725,7 +877,69 @@ marked ★ are the open questions the build could not answer itself.
     a counter and says so. `peep rename last con` is refused (`CON is a
     device name Windows reserves`).
 
+### The cut (session C1b)
+
+60. Run `peep agent restart` (it syncs and loads the new code), then `peep
+    ls`. Recordings show `[2 seg · 3 takes]` where they have them.
+61. **Zero presses.** `peep rec quick`, talk for 10 s, press **q**. After
+    `✓ saved`, the terminal prints `✂ rendering the cut…`, the percentages,
+    and `✓ cut: …quick.cut.mp4 (00:0x of 00:1x, 1 piece(s), …)` with no
+    fallbacks. Step through the cut's first and last frames (mpv `.`/`,`):
+    no magenta, no green, no warm-up. Its start is the first frame after the
+    magenta in the original.
+62. **Render the C1a smoke recording** (step 51 or 55):
+    `peep render <its stem> --dry-run`. Every boundary should read `detected
+    6 frame(s)`, with a difference of a few tens of ms. ★ **Note the
+    `measured_rgb` of the blue, red and yellow patches** in the sidecar's
+    `render.boundaries` once rendered: this is the first measurement of the
+    patch colours through the pipeline (expected about (0,0,254),
+    (254,0,0), (254,254,0)). Then `peep render <stem>`.
+63. **The seams, by ear and eye.** Play the cut (`peep open`). At each join,
+    the voice should resume cleanly: no clipped first or last word, no click,
+    and no take patch in any frame. The pause seam (step 55) should be one
+    continuous take with a hard picture cut. Step frame by frame across
+    each seam: no blue, red, yellow, magenta or green.
+64. **Marks.** Record with two marks (Ctrl+Alt+M) inside a take, render, and
+    open the cut in a player that shows chapters (mpv: the chapter list). It
+    has `start` and the marks. Step through a mark: the cyan corner is
+    hidden. That corner holds still for ~200 ms instead.
+65. ★ **Speed and the agent.** Record ~2 minutes with the hotkey, press
+    Enter in the dialog, and at once start another recording with
+    Ctrl+Alt+R. The `✂ rendering …` toast appears, the new recording starts
+    normally, and its picture shows no stutter. Note how long the first
+    render takes (`render.elapsed_s` in its sidecar; the probe predicts
+    ~6x real time, about 20 s). Stop the second recording; its render
+    queues after the first.
+66. **Failure path.** Open the cut of step 61 in a player that locks it,
+    then `peep render quick --force`. It should fail with `could not put the
+    cut in place … open in a player?`, the original untouched. Close the
+    player and run it again: `✓ cut`.
+67. **Open.** `peep open last` plays the cut; `peep open last --raw` the
+    original. For a paused recording with `render.auto = "never"` (set it
+    for one recording, then unset it), `peep open` plays both segments in
+    order (a playlist) and says it is not rendered yet.
+68. **Format.** `ffprobe.exe -v error -show_entries stream=codec_name,width,height,r_frame_rate,color_space,color_range,color_transfer:stream_tags=title -show_chapters -of compact "<cut>"`
+    should match the original's line from step 7, with chapters when there
+    were marks. With `audio.mix = "separate"` it should show two titled
+    audio tracks.
+69. ★ **Clap calibration.** In a rendered recording's sidecar,
+    `render.calibration[].residual_ms` is the A/V residual the clap measured
+    (A.1 measured -16..+7 ms). Note a few values; if they sit consistently
+    beyond ±33 ms, consider `peep config set render.av_calibration apply`.
+
 ## Troubleshooting
+
+- **The cut is missing a word at a seam, or keeps too much silence:**
+  `peep render <stem> --dry-run` shows where each seam went and why
+  (`silence`, `snap`). Raise `render.silence_keep_ms`, lower
+  `render.silence_db` (more counts as sound), or set
+  `render.silence_max_trim_ms = 0`, then `peep render <stem> --force`.
+- **`N fallback(s)` after a render:** a flash or patch was not found where
+  the sidecar placed it. The cut used the stamp instead and erred toward
+  cutting a little more. The sidecar's `render.fallbacks` says which one and
+  why. `peep render --dry-run` shows the colour it saw instead.
+- **A render failed:** the original is untouched. The toast or the terminal
+  says why. `peep render` retries, and `peep render --dry-run` shows the plan.
 
 - **`python.exe` opens the Microsoft Store, or isn't found:** run
   `winget install Python.Python.3.12`, then `wsl --shutdown`.

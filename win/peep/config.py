@@ -140,6 +140,23 @@ class AgentConfig:
 
 
 @dataclass(frozen=True)
+class RenderConfig:
+    """Session C1b: the cut (`<stem>.cut.mp4`) rendered from the event record.
+    Measured on the laptop (render probe, 2026-10-07): a QSV re-encode of
+    2560x1600 runs at ~6x real time, the flashes land 38-48 ms after their
+    stamps, and the fiducial colours decode within 2 of what was shown."""
+    auto: str = "always"                 # always | takes (only when there are takes or pauses) | never
+    search_s: float = 1.0                # look for each flash/patch this far either side of its stamp
+    snap_ms: int = 300                   # move a seam up to this far into the kept side, to the quietest 10 ms
+    crossfade_ms: int = 40               # audio crossfade at every join (the video cut is hard)
+    silence_db: float = -45.0            # below this (10 ms RMS, dBFS) counts as silence for trimming
+    silence_max_trim_ms: int = 1000      # trim at most this much silence off a take's edge (0 = never trim)
+    silence_keep_ms: int = 250           # silence left before the first sound / after the last one
+    min_interval_ms: int = 250           # a kept piece shorter than this after trimming is dropped (and said so)
+    av_calibration: str = "measure"      # measure (record the clap residual) | apply (also correct it) | off
+
+
+@dataclass(frozen=True)
 class Config:
     root: str = field(default_factory=default_root)
     default_collection: str = "inbox"
@@ -150,6 +167,7 @@ class Config:
     output: OutputConfig = field(default_factory=OutputConfig)
     ffmpeg: FfmpegConfig = field(default_factory=FfmpegConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
+    render: RenderConfig = field(default_factory=RenderConfig)
     source: str = "defaults"             # where this config came from (path or "defaults"); not a TOML key
 
     def root_path(self) -> Path:
@@ -183,10 +201,12 @@ class ConfigError(ValueError):
 
 
 _SECTIONS = {"video": VideoConfig, "audio": AudioConfig, "flash": FlashConfig,
-             "output": OutputConfig, "ffmpeg": FfmpegConfig, "agent": AgentConfig}
+             "output": OutputConfig, "ffmpeg": FfmpegConfig, "agent": AgentConfig, "render": RenderConfig}
 PILL_POSITIONS = ("top-right", "top-left", "top-center", "bottom-right", "bottom-left", "bottom-center")
 PATCH_CORNERS = ("auto", "top-left", "top-right", "bottom-left", "bottom-right")
 MARK_STYLES = ("patch", "full")
+RENDER_AUTO = ("always", "takes", "never")
+AV_CALIBRATION = ("measure", "apply", "off")
 FIDUCIAL_COLOR_KEYS = ("start_color", "stop_color", "mark_color", "take_open_color", "take_close_color",
                        "retake_color")
 MIN_COLOR_DISTANCE = 96       # some channel must differ by this much, so C1b cannot confuse two fiducials
@@ -262,6 +282,21 @@ def validate(cfg: Config) -> None:
     if cfg.log_level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR"):
         raise ConfigError(f"log_level must be DEBUG/INFO/WARNING/ERROR, got {cfg.log_level!r}")
     validate_agent(cfg.agent)
+    validate_render(cfg.render)
+
+
+def validate_render(r: "RenderConfig") -> None:
+    if r.auto not in RENDER_AUTO:
+        raise ConfigError(f"render.auto must be one of {RENDER_AUTO}, got {r.auto!r}")
+    if r.av_calibration not in AV_CALIBRATION:
+        raise ConfigError(f"render.av_calibration must be one of {AV_CALIBRATION}, got {r.av_calibration!r}")
+    checks = (("search_s", 0.2, 5.0), ("snap_ms", 0, 2000), ("crossfade_ms", 0, 500),
+              ("silence_db", -90.0, -10.0), ("silence_max_trim_ms", 0, 10000), ("silence_keep_ms", 0, 5000),
+              ("min_interval_ms", 40, 10000))
+    for name, lo, hi in checks:
+        value = getattr(r, name)
+        if not lo <= value <= hi:
+            raise ConfigError(f"render.{name} must be {lo}..{hi}, got {value}")
 
 
 def _rgb(color: str) -> tuple[int, int, int]:
@@ -445,4 +480,15 @@ TEMPLATE = '''\
 # pill = true                     # the REC pill (hidden from the recording itself)
 # pill_position = "top-right"     # top-right | top-left | top-center | bottom-right | bottom-left | bottom-center
 # pill_margin_px = 24
+
+[render]                          # session C1b: the cut, <stem>.cut.mp4 beside the original (never modified)
+# auto = "always"                 # always | takes (only recordings with takes or pauses) | never; `peep render` any time
+# search_s = 1.0                  # look for each flash / corner patch this far either side of its stamp
+# snap_ms = 300                   # move each seam up to this far into the kept side, to the quietest 10 ms
+# crossfade_ms = 40               # audio crossfade at every join; the picture cuts hard
+# silence_db = -45.0              # quieter than this counts as silence (10 ms RMS, dBFS)
+# silence_max_trim_ms = 1000      # trim at most this much silence off each take edge; 0 = never
+# silence_keep_ms = 250           # silence kept before the first sound and after the last
+# min_interval_ms = 250           # a kept piece shorter than this is dropped, and the render says so
+# av_calibration = "measure"      # measure: record the clap's A/V residual | apply: also correct it | off
 '''

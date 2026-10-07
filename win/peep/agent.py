@@ -18,6 +18,14 @@ only forwards presses; one worker thread per recording runs A's
 `Recorder.record()` unchanged, with the agent's marshalled flasher and a
 `stop_event` the hotkeys set (A's Proposal 1).
 
+Session C1b: after the dialog's Save or Esc (or straight after the stop when
+the dialog is off), the recording's cut is rendered in the background
+(render.auto), on the render queue's own worker thread: one render at a time,
+in order, a toast when it starts and when it finishes or fails, progress in
+agent.json (`peep agent status`). The agent stays responsive throughout and a
+new recording may start while a render runs. A failed render leaves the
+original untouched; `peep render` retries it.
+
 Terminal-driven recordings keep A's behaviour: `peep rec` + q and `peep
 stop` never show the dialog. The agent does notice them (the pill shows
 any live recording, from active.json), and its hotkeys act on them the way
@@ -31,8 +39,8 @@ wiring is `ui.TkUi`; `run_agent` puts the pieces together.
 
 Sections:
   1. Prefs (last-used collection)   (~line 55)
-  2. Agent                          (~line 100)
-  3. run_agent                      (~line 470)
+  2. Agent                          (~line 110)
+  3. run_agent                      (~line 680)
 """
 
 from __future__ import annotations
@@ -49,6 +57,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import __version__, catalog, config as config_mod, dialog, events, hotkeys, lifecycle, naming, paths
+from . import render as render_mod
 from .catalog import write_json_atomic
 from .control import AgentAlreadyRunning, AgentControl, AlreadyRecording, Control
 from .logsetup import event
@@ -146,7 +155,8 @@ class Agent:
                  load_config: Callable[[], config_mod.Config] | None = None,
                  config_mtime: Callable[[], float | None] | None = None,
                  install_check: Callable[[], dict] | None = None, code: str | None = None,
-                 spawn: Callable = _thread, now: Callable[[], _dt.datetime] | None = None):
+                 spawn: Callable = _thread, now: Callable[[], _dt.datetime] | None = None,
+                 render_queue=None):
         self.cfg = cfg
         self.ui = ui
         self.control, self.agent_control, self.prefs = control, agent_control, prefs
@@ -165,6 +175,9 @@ class Agent:
         self.pill_problem: str | None = None
         self.install: dict = {"state": "unknown", "detail": "not checked yet"}
         self._ticks = 0
+        self.render_queue = render_queue          # render.RenderQueue (run_agent); None: no background renders
+        self.render_state: dict | None = None     # the render in progress, for agent.json
+        self._render_hints: dict = {}             # uid -> {"summary", "segments"}, from the recording's result
         self._mtime = self.config_mtime()
         self.config_loaded_at = catalog.now_iso()
 
@@ -197,6 +210,11 @@ class Agent:
         self._publish(state="stopping")
         if self.dialog is not None and not self.dialog.closed:
             self.dialog.resolve(dialog.KEEP)
+        if self.render_queue is not None:
+            dropped = self.render_queue.stop()
+            if dropped or self.render_state:
+                event(log, logging.WARNING, "agent.renders_stopped", running=(self.render_state or {}).get("name"),
+                      dropped=[j["name"] for j in dropped], hint="`peep render` renders them")
         if self.session is not None:
             self._stop_own("exit")
             return                          # _finished completes the shutdown
@@ -391,7 +409,10 @@ class Agent:
         elif kind == "exit" or not self.cfg.agent.dialog:
             self.prefs.set_last_collection(session.collection)
             self._toast(f"saved {result.media_path.name}", "info", 4)
+            self._render_hints[result.uid] = self._hint(result)
+            self.maybe_render(result.uid, result.media_path.name)
         else:
+            self._render_hints[result.uid] = self._hint(result)
             self._open_dialog(session, result)
         self._show_pill(None, None)
         if self.exiting:
@@ -439,8 +460,10 @@ class Agent:
             self.prefs.set_last_collection(recorded_in)
             self._toast(f"kept {file_name}", "info", 3)
             event(log, logging.INFO, "agent.dialog_keep", uid=uid)
+            self.maybe_render(uid, file_name)
             return None
         if action == dialog.DISCARD:
+            self._render_hints.pop(uid, None)
             return self._discard(uid, "dialog")
         if action == dialog.SAVE:
             choice, problem = dialog.validate_choice(name, collection)
@@ -456,6 +479,7 @@ class Agent:
                                                  if getattr(entry, "suffixed", False) else ""), "info", 4)
             event(log, logging.INFO, "agent.dialog_save", uid=uid, file=entry.file,
                   suffixed=getattr(entry, "suffixed", False))
+            self.maybe_render(uid, Path(entry.file).name)
             return None
         event(log, logging.WARNING, "agent.dialog_unknown_action", action=action)
         return None
@@ -474,6 +498,68 @@ class Agent:
         except (OSError, LookupError, naming.NamingError, ValueError) as exc:
             return f"cannot save: {exc}"
         return dialog.preview_text(plan)
+
+    # -- the render (session C1b) ----------------------------------------------------
+
+    @staticmethod
+    def _hint(result) -> dict:
+        return {"summary": getattr(result, "summary", None), "segments": getattr(result, "segments", 1) or 1}
+
+    def maybe_render(self, uid: str, name: str) -> bool:
+        """Queue the recording's cut when render.auto says so. Returns whether it was queued;
+        every reason it was not is logged."""
+        hint = self._render_hints.pop(uid, None) or {}
+        auto = self.cfg.render.auto
+        if not render_mod.should_render(auto, hint.get("summary"), hint.get("segments", 1)):
+            event(log, logging.INFO, "agent.render_skipped", uid=uid, why=f"render.auto={auto}")
+            return False
+        if self.exiting:
+            event(log, logging.INFO, "agent.render_skipped", uid=uid, why="the agent is exiting; `peep render` does it")
+            return False
+        if self.render_queue is None:
+            event(log, logging.WARNING, "agent.render_skipped", uid=uid, why="no render queue in this agent")
+            return False
+        try:
+            ahead = self.render_queue.submit(uid, name)
+        except RuntimeError as exc:
+            event(log, logging.WARNING, "agent.render_skipped", uid=uid, why=str(exc))
+            return False
+        if ahead:
+            self._toast(f"✂ {name}: render queued ({ahead} ahead)", "info", 3)
+        return True
+
+    def on_render_event(self, kind: str, info: dict) -> None:
+        """UI thread: what the render queue's worker reported."""
+        name = info.get("name") or "?"
+        if kind == "start":
+            self.render_state = {"name": name, "uid": info.get("uid"), "stage": "starting", "progress": None,
+                                 "started_at": catalog.now_iso()}
+            self._toast(f"✂ rendering {name}…", "info", 2.5)
+            self._publish(render=self.render_state)
+        elif kind == "progress":
+            st = self.render_state or {"name": name, "uid": info.get("uid")}
+            frac = info.get("fraction")
+            last = st.get("progress")
+            st["stage"] = info.get("stage")
+            if frac is None or last is None or frac >= last + 0.1 or frac >= 1.0:
+                st["progress"] = None if frac is None else round(frac, 2)
+                self.render_state = st
+                self._publish(render=st)
+        elif kind == "done":
+            res = info.get("result")
+            self.render_state = None
+            self._publish(render=None)
+            if res is not None and not res.up_to_date:
+                fb = f" · {len(res.fallbacks)} fallback(s), see `peep render --dry-run`" if res.fallbacks else ""
+                self._toast(f"✂ cut ready: {res.cut_path.name} ({events.format_mmss(res.duration_s)} of "
+                            f"{events.format_mmss(res.source_s)}){fb}", "warning" if res.fallbacks else "info", 6)
+        elif kind == "failed":
+            self.render_state = None
+            self._publish(render=None)
+            self._toast(f"✂ render failed for {name}: {info.get('error')}. The original is kept; "
+                        f"`peep render` retries.", "error", 12)
+        event(log, logging.INFO if kind != "failed" else logging.ERROR, "agent.render_event", kind=kind, file=name,
+              **({"error": info.get("error")} if kind == "failed" else {}))
 
     # -- discard ----------------------------------------------------------------------
 
@@ -660,6 +746,24 @@ def run_agent(cfg: config_mod.Config) -> int:
         root.withdraw()
         control = Control(state, winapi.pid_alive)
         ui = TkUi(root)
+        renders: dict = {}
+        holder: dict = {}
+
+        def render_job(uid, progress):
+            r = render_mod.Renderer(holder["agent"].cfg, job_factory=winapi.KillOnCloseJob)
+            renders["current"] = r
+            try:
+                return r.render(uid, progress=progress)
+            finally:
+                renders.pop("current", None)
+
+        def cancel_render():
+            r = renders.get("current")
+            if r is not None:
+                r.cancel()
+
+        queue = render_mod.RenderQueue(render_job, lambda kind, info: ui.post(holder["agent"].on_render_event,
+                                                                              kind, info), cancel=cancel_render)
 
         def recorder_factory(run_cfg, status):
             return Recorder(run_cfg, control, flasher_factory=ui.flasher_factory, status=status)
@@ -676,7 +780,8 @@ def run_agent(cfg: config_mod.Config) -> int:
         agent = Agent(cfg, ui=ui, control=control, agent_control=agent_control,
                       prefs=Prefs(paths.data_dir() / PREFS_NAME), recorder_factory=recorder_factory,
                       listener_factory=listener_factory, config_mtime=config_mtime,
-                      install_check=lambda: lifecycle.install_status(app), code=code)
+                      install_check=lambda: lifecycle.install_status(app), code=code, render_queue=queue)
+        holder["agent"] = agent
         agent.start()
         root.mainloop()
         if not agent.quit_done:              # the Tk loop ended some other way (e.g. a logoff)
