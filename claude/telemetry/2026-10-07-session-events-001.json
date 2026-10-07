@@ -1,0 +1,348 @@
+{
+  "record_version": 1,
+  "session_id": "2026-10-07-session-events-001",
+  "created_at": "2026-10-07T03:26:54+00:00",
+  "attempts": [
+    {
+      "at": "2026-10-07T03:26:54+00:00",
+      "outcome": "opened",
+      "command": "pack",
+      "closure_reason": null,
+      "tarball": null,
+      "validation": null,
+      "scope_kind": "write-forecast",
+      "scope": [
+        "."
+      ],
+      "overridden_paths": [],
+      "overridden_path_sources": {},
+      "required_check_overrides": [],
+      "base_drift_overrides": [],
+      "sandbox_escaped": false,
+      "network_grant_exercised": false,
+      "sandbox_confined": true,
+      "sandbox_off_source": null,
+      "cost": {
+        "tokens_in": null,
+        "tokens_out": null,
+        "usd": null,
+        "model_tier": null
+      },
+      "change_paths": [],
+      "feedback": null,
+      "log": ".bale/logs/2026-10-07-session-events-001.log",
+      "bundle": {
+        "stem": "2026-10-07-session-events",
+        "brief_sha256": "1df7386b2009293a8d99b4cf7ffaeb9f8a91630025be3e3e065f336c9e52bcb0",
+        "checkpoint_sha256": null,
+        "manifest_sha256": "9fe6071a5469614b787c42fcf8235c6c21f8f98e86ba226995a6d885a1e1cedf"
+      },
+      "provenance": {
+        "work_class": "code",
+        "packer": "chordsphere",
+        "packed_at": "2026-10-07T03:26:54+00:00"
+      }
+    },
+    {
+      "at": "2026-10-07T11:48:15+00:00",
+      "outcome": "applied",
+      "command": "apply",
+      "closure_reason": null,
+      "tarball": "response-2026-10-07-session-events-001.tar.gz",
+      "validation": {
+        "state": "PASS",
+        "exit_code": 0,
+        "claims": {
+          "unittest suite (python3 -m unittest discover -s tests -t ., capped 900 s)": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "C1a: names are allocated case-insensitively against the folder and the catalog": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "C1a: Windows-reserved names are refused": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "C1a: the stop dialog prefills the real name, counter included (the 2026-10-06 report)": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "C1a: the event model (take toggle, retake, debounce, take across a pause)": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "C1a: sidecars are written as peep.sidecar/2 and /1 still loads": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "C1a: no clobbering rename/replace left on a recording-file path": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "C1a: pause/resume/take/retake are wired in the CLI, the shim and the hotkeys": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "C1a: audio, Win32 and lifecycle modules byte-identical to the request": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "C1a: the live recording (recording or paused) cannot be renamed or discarded": {
+            "value": "pass",
+            "claim_basis": "observed"
+          }
+        },
+        "claim_verdict": {
+          "unittest suite (python3 -m unittest discover -s tests -t ., capped 900 s)": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "C1a: names are allocated case-insensitively against the folder and the catalog": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "C1a: Windows-reserved names are refused": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "C1a: the stop dialog prefills the real name, counter included (the 2026-10-06 report)": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "C1a: the event model (take toggle, retake, debounce, take across a pause)": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "C1a: sidecars are written as peep.sidecar/2 and /1 still loads": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "C1a: no clobbering rename/replace left on a recording-file path": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "C1a: pause/resume/take/retake are wired in the CLI, the shim and the hotkeys": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "C1a: audio, Win32 and lifecycle modules byte-identical to the request": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "C1a: the live recording (recording or paused) cannot be renamed or discarded": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          }
+        },
+        "reconciliation_parsed": true,
+        "validation_will_run": [
+          "python syntax (changed .py files and bin/peep)",
+          "unittest suite (python3 -m unittest discover -s tests -t ., capped 900 s)",
+          "C1a: names are allocated case-insensitively against the folder and the catalog",
+          "C1a: Windows-reserved names are refused",
+          "C1a: the stop dialog prefills the real name, counter included (the 2026-10-06 report)",
+          "C1a: the event model (take toggle, retake, debounce, take across a pause)",
+          "C1a: sidecars are written as peep.sidecar/2 and /1 still loads",
+          "C1a: no clobbering rename/replace left on a recording-file path",
+          "C1a: pause/resume/take/retake are wired in the CLI, the shim and the hotkeys",
+          "C1a: the live recording (recording or paused) cannot be renamed or discarded",
+          "C1a: audio, Win32 and lifecycle modules byte-identical to the request",
+          "bin/peep is executable"
+        ]
+      },
+      "scope_kind": "write-forecast",
+      "scope": [
+        "."
+      ],
+      "overridden_paths": [],
+      "overridden_path_sources": {},
+      "required_check_overrides": [],
+      "base_drift_overrides": [],
+      "sandbox_escaped": false,
+      "network_grant_exercised": false,
+      "sandbox_confined": true,
+      "sandbox_off_source": null,
+      "cost": {
+        "tokens_in": null,
+        "tokens_out": null,
+        "usd": null,
+        "model_tier": null
+      },
+      "change_paths": [
+        "README.md",
+        "bin/peep",
+        "tests/test_c1a_surface.py",
+        "tests/test_config.py",
+        "tests/test_events.py",
+        "tests/test_hotkeys.py",
+        "tests/test_naming_audit.py",
+        "tests/test_segments.py",
+        "win/peep/agent.py",
+        "win/peep/agentcli.py",
+        "win/peep/catalog.py",
+        "win/peep/cli.py",
+        "win/peep/config.py",
+        "win/peep/control.py",
+        "win/peep/dialog.py",
+        "win/peep/events.py",
+        "win/peep/flash.py",
+        "win/peep/hotkeys.py",
+        "win/peep/naming.py",
+        "win/peep/pill.py",
+        "win/peep/recorder.py",
+        "win/peep/ui.py"
+      ],
+      "feedback": {
+        "mechanical": {
+          "response_kind": "normal",
+          "schema_valid": true,
+          "mirror_agreement": {
+            "changes_to_files": true,
+            "files_to_changes": true
+          },
+          "claims_subset": true,
+          "provenance": {
+            "bale_version": "0.4.46",
+            "contract_docs": {
+              "AGENT.md": "5124250b3d6362ae362801f89e2c0498a6e493c638a398de2f4c3d13d6c12285",
+              "TARBALL.md": "32680c8efcfb1c56c486846d0187063d38b7c5333e48c553db1a9ae0b2d118b1",
+              "DOCS.md": "90cc9aad0670610b7865a54db33975103580cdd3354d000b8db07f8a6e956d0c",
+              "CODE.md": "49a145323bfc472a22dd8be56565d6e7767fd1ffbd33c36cda95e7e3e149ab75",
+              "PLANNER.md": "5af584b98ed0591b57fbb146baf1441f8130a894e050882d22b3cd62c5cd17d5"
+            },
+            "packer": "chordsphere",
+            "work_class": "code",
+            "checkpoint": null,
+            "checkpoint_scope_admitted": false,
+            "packed_at": "2026-10-07T03:26:54+00:00",
+            "base_files": {
+              ".gitignore": "be556e2cd3057567ca2806a9a3f877e080beede941b98dc77150b7813c20f40e",
+              "README.md": "32ae1194d2e96180d836df7e7cd0f547c6cfd8155171ad96f4514e9eb9d5c394",
+              "bin/peep": "58108ba21a343ec800b65d887f8aef6842b2930bd9c414ba29279b42433f26f2",
+              "claude/responses/2026-10-05-engine-storage-core-002/notes.md": "5ac2235ed730692ab5fcfbb67c81a03676f2040d666b1b707cd73a53688424ed",
+              "claude/responses/2026-10-05-resident-agent-003/notes.md": "0026815638d659295deb1f405e76ef0149bbcf026c66a99a484a760f52ac0c86",
+              "claude/responses/2026-10-06-audio-pipeline-001/notes.md": "5c450d65a00a280e6d0cf4dbd764400f586033edb78898dcbce12ee823eaed5d",
+              "claude/responses/2026-10-06-stdin-shutdown-fix-002/notes.md": "22a750ad2e4f2571ddb39b8cb3b0235ccbf161b2c80ca852caa792b23bc033f9",
+              "claude/telemetry/2026-10-05-engine-storage-core-002.json": "3d19cdf2556dd26e6a4c669b7dfea5271783e5f46d3a6251d1665c0bf9f31d3c",
+              "claude/telemetry/2026-10-05-resident-agent-003.json": "4bbcc1f03086ad8bf59f22f8443ded8a894eee92af6244cac6e90136aa935cb9",
+              "claude/telemetry/2026-10-06-audio-pipeline-001.json": "ce4c3a3346bce7413b8797dfee70e9984bca8c816ad3d2239502d0b4fd722f1c",
+              "claude/telemetry/2026-10-06-stdin-shutdown-fix-002.json": "6a06dd15fa1c09e2113afe12e7c6154e0da64dd400b81b02dd8069b6e0c7f2e4",
+              "pyproject.toml": "583f0f265e8cb543625e5679788544f772e185cde9fbf408b6b96e4010482af3",
+              "start.md": "8d7235777c4466098fcbee355c33af1a7224b8f7b7e845ee718d8f6d6442c682",
+              "tests/__init__.py": "fe4a4f8dfc75a518bc43601b626e0e4a1518959a3e008fad55d02ae22389c817",
+              "tests/fake_ffmpeg.py": "9dfaff3f316661dc43d89d1806a121c686d7ec0cbb3f6e152b24e0c23d1838fc",
+              "tests/fake_wasapi.py": "81775c198fb10dff823d09e4da45e4848d72bc812c77a7a4575f09492b79706f",
+              "tests/test_agent.py": "70ade9452cfdb1e2090090421009563810096d3de903c20588c4a7d1a0f337ac",
+              "tests/test_agentcli.py": "39dbda942870afed0ed085f7a57ae193cce86fa97a81a9bd78dff6acd3d702ef",
+              "tests/test_catalog.py": "e2adeb256ca2d7f5fff5e87acaba05fdd3c830f34f938528643de3f93b4cac6b",
+              "tests/test_cli.py": "771a05ae399eabe93db510117ea221b9ef0105ac9e9adc7c80f4d5f2b212ce0a",
+              "tests/test_config.py": "51ff32abf2571cafa17af7d27754dd5b8145bcccfb0fc3d89095e7338e2e55c4",
+              "tests/test_configedit.py": "84d42a305c6f58e977e237c1df87ff08035858bdac2c05e58d2ca45b54b7223e",
+              "tests/test_control.py": "abd0687a18df4b94d6e0bae4776b500f0cfed7e85726134f74322538ddc3dfed",
+              "tests/test_dialog.py": "19899e04598127a1730782fdc71c16a73d53f7175acd7f357b21aed7e6a3654b",
+              "tests/test_doctor.py": "35662168a6f1ece9d044fcd79b555fa13bff00b99c106987f67a1271de93380d",
+              "tests/test_ffmpeg_cmd.py": "b75afca1b9a5021746f59a00de43f86f76032db8d5f4d7850b7d984e0bed8c8c",
+              "tests/test_hotkeys.py": "e4230dadc0106882965e7cb8ecfc0362be72ddef837412b304fc45fe93a4c028",
+              "tests/test_lifecycle.py": "1c8e2d9707589ab5cb5facac79207e932c6b27c9188b11ffff96216a82256711",
+              "tests/test_marks.py": "c2c7948e6bc56a6d5d6d3b39275bffe848eb13fd8a285bc760d2acae157ea5ce",
+              "tests/test_naming.py": "02245a325b8eccea642863658c9217d399b1c9057e4d32f1b52c50a5cd0cfde8",
+              "tests/test_recorder.py": "c22fddb20967b92c3ef7d00b1150ecb9c6f03515c4d2883bf8ce5dc885166d88",
+              "tests/test_shim.py": "c046b38264ebea69a65023692a75113ff17aa341d7bf8000c6f933f2971874a9",
+              "tests/test_wasapi.py": "25243877be5d24e023d7f7abde2bb4789772548aac74670b3c1b7d503c312a4c",
+              "win/peep/__init__.py": "6e87c0cdb7018a8cfcb35ec7b5d0cb8aaee6b0b52a3b5a64dd61f7c01ee1bbd4",
+              "win/peep/__main__.py": "f5c32d04986abec782824be436da94704abd3a940faa65868b21928f00ef3e46",
+              "win/peep/agent.py": "14d73d20728c73086afc4e537f5c4e6e87b516db5eca63298390b24efc305af2",
+              "win/peep/agentcli.py": "5eee1e5b10a50a70dc67dfae13de34539260fe8e1c3d672dfa3fd1a2235eb6ee",
+              "win/peep/catalog.py": "d8796bd1e0bcf5690afe63dc809667c1e2aa5b8edd8b9e02be46f8b7bcd132fc",
+              "win/peep/cli.py": "93242b84925b8ba5a3fd35d35d51a15dc0d2a51446c61c988897a26a5a458810",
+              "win/peep/config.py": "1c0894497e7bddbb5e6afdcdff0bf6d4465936bca280b8970ac04b87cee4fb97",
+              "win/peep/configedit.py": "808bc32f49bb9c0392fc003b62d4ee1940cfca45b4d93f2ff839b692d71db355",
+              "win/peep/control.py": "8542310ab4227bd3ed43e31d0d0e6ffa0e13d3a3b2966eea7fbe6ee853ddb115",
+              "win/peep/dialog.py": "c5d803fd0aaca0877f51c9950fbaff581063b5ea9b9f3d662fd31297538f365c",
+              "win/peep/doctor.py": "8f250448a85c452777fe4e2c836803ee1d16b6846ff7e7c99ca7aa51952987c5",
+              "win/peep/ffmpeg_cmd.py": "6d183d908087a8089d2fb1a67fabfdc5863b3359b3429668b528ed59a7257de2",
+              "win/peep/flash.py": "67bd0e3dc5db39b96e8a833c3971b72183fc945f79ddafdfa6813cddefad1c0f",
+              "win/peep/hotkeys.py": "e9afac203f5d73c03b65f225c66d7fa34cdd1f04238a3095e0391bc094584b38",
+              "win/peep/lifecycle.py": "bd21750ffb3c13c78f5e65b1a984f52bd2a580559b60602e76e1940d7d59237f",
+              "win/peep/logsetup.py": "f770126d30c631410f5a51816b7babf198b9e064c76c5949858ddb58ada38b1c",
+              "win/peep/naming.py": "cf3fa74e5632ca0deca88eb418a82a5c49d6873b0ac0bf7af7e921e17f53c672",
+              "win/peep/paths.py": "6d9956681597493d89f8193464204ba36d894dd62ae96513f886ac84e3f3157b",
+              "win/peep/pill.py": "e4c1a0ba8a902c427674c4048256b7be0461494811e56420973a70e178adf4fc",
+              "win/peep/recorder.py": "87f691ef93bdcc6e60cb489b0cf1dce8dce2c1624049093cd3f58c58d9f5ab16",
+              "win/peep/ui.py": "8c6b65678b764300cbdca9aec2125ec4992383b32a3256037a88fbd98a40dbfb",
+              "win/peep/wasapi.py": "b7d8e38798e1ec028ba4a1e5f2f060dcd72b2940644f7f2f878116f41b9dec33",
+              "win/peep/winapi.py": "0224a454f2776585bdf760f80a910d5b61a1e3a62a19ef470c17f025e5eb20e8",
+              "win/peepw.py": "4d1235bb3d52360257fdb3aaf15cc64179150b380c83645236ccd924f1eaeb55"
+            },
+            "model_identity": "anthropic:claude-opus-5-5"
+          },
+          "linkage": {
+            "kind": "probe",
+            "point": "pre-build",
+            "depends_on": null
+          }
+        },
+        "self_reported": {
+          "assumptions": [
+            "QueryPerformanceCounter stamps taken in the requesting process (the agent's hotkey thread, or python.exe for a WSL command) compare directly with the recorder's, as A.1's capture children already rely on",
+            "the corner patch colours survive the capture pipeline like A's magenta and green (not measured; smoke step 54)"
+          ],
+          "judgment_calls": [
+            "sidecar bumped to peep.sidecar/2 (segments change what the file beside it means); /1 loads through catalog.as_v2 and is never rewritten",
+            "per-segment remux when each segment ends, not deferred to C1b",
+            "segment files <stem>.seg<k>.mp4; segment 1 keeps A's names and the catalog points at it",
+            "default chords Ctrl+Alt+P / Ctrl+Alt+T / Ctrl+Alt+Backspace (Y avoided: next to T)",
+            "debounce per chord from the last accepted press, hotkeys only; ignored presses kept in the record",
+            "take open/close as two patch colours (blue/red), retake yellow, marks moved to the cyan patch with mark_style=full as the escape",
+            "presses during a pause take effect at the segment boundary",
+            "a paused recording is catalogued with in_progress=paused; the final event replaces it",
+            "a failed later segment keeps the recording ok; a single-segment failure is unchanged",
+            "a stem is reserved by any '<stem>.' file (case-insensitive) or a catalogued recording, including missing files",
+            "the dialog prefills the file's real name with its counter and previews the final name live",
+            "bare F13-F24 allowed as chords",
+            "rename/discard refuse the live recording (independent review finding); a recording whose recorder died is renamable again"
+          ],
+          "budget_pressure": "none",
+          "includes_missing": [],
+          "compaction_occurred": {
+            "occurred": false,
+            "disclosure_ref": null
+          },
+          "docs_read": [
+            "manifest.json",
+            "AGENT.md META through 11.2",
+            "README.md (the request's brief)",
+            "TARBALL.md sections 1, 2, 3.3, 4, 5, 7, 10.1",
+            "README.md (the project's)",
+            "start.md",
+            "claude/responses notes.md of sessions A, B, A.1 and A.2"
+          ],
+          "light_blocks": 0
+        }
+      },
+      "log": ".bale/logs/2026-10-07-session-events-001.log",
+      "clarification": {
+        "rounds": 0,
+        "records": []
+      },
+      "corrects": null,
+      "checkpoint": {
+        "configured": false
+      }
+    }
+  ],
+  "updated_at": "2026-10-07T11:48:15+00:00",
+  "outcome": "applied"
+}
