@@ -1,0 +1,349 @@
+{
+  "record_version": 1,
+  "session_id": "2026-10-07-correction-and-pill-003",
+  "created_at": "2026-10-07T23:10:30+00:00",
+  "attempts": [
+    {
+      "at": "2026-10-07T23:10:30+00:00",
+      "outcome": "opened",
+      "command": "pack",
+      "closure_reason": null,
+      "tarball": null,
+      "validation": null,
+      "scope_kind": "write-forecast",
+      "scope": [
+        "."
+      ],
+      "overridden_paths": [],
+      "overridden_path_sources": {},
+      "required_check_overrides": [],
+      "base_drift_overrides": [],
+      "sandbox_escaped": false,
+      "network_grant_exercised": false,
+      "sandbox_confined": true,
+      "sandbox_off_source": null,
+      "cost": {
+        "tokens_in": null,
+        "tokens_out": null,
+        "usd": null,
+        "model_tier": null
+      },
+      "change_paths": [],
+      "feedback": null,
+      "log": ".bale/logs/2026-10-07-correction-and-pill-003.log",
+      "bundle": {
+        "stem": "2026-10-07-correction-and-pill",
+        "brief_sha256": "60848ec3f63db61e4bc58c1195ff9d0f51d4fb792d037300746bf5c548e4d8e4",
+        "checkpoint_sha256": null,
+        "manifest_sha256": "b15c733aaf9db439b050661e0a53e4c0cd931e1c0c7670c4d7ec97941f97487b"
+      },
+      "provenance": {
+        "work_class": "code",
+        "packer": "chordsphere",
+        "packed_at": "2026-10-07T23:10:30+00:00"
+      }
+    },
+    {
+      "at": "2026-10-08T00:51:11+00:00",
+      "outcome": "applied",
+      "command": "apply",
+      "closure_reason": null,
+      "tarball": "response-2026-10-07-correction-and-pill-003.tar.gz",
+      "validation": {
+        "state": "PASS",
+        "exit_code": 0,
+        "claims": {
+          "unittest suite (tests/, capped at 900 s; ~2.5 min)": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "assert: README carries the ratified chart and pill mockups verbatim": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "assert: the correction key follows the chart (no take: ignored; 1 moves the close; 2 and 3 drop and restart)": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "assert: the pill's hint is what the next press does, and reads as the mockups": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "assert: a moved close's red patch is concealed and no fiducial frame reaches the cut": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "assert: correct is the action's name and retake still works (config keys, command)": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "assert: sidecars written under C1a's retake rule render their recorded intervals": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "pin: files outside this session's change are byte-identical": {
+            "value": "pass",
+            "claim_basis": "observed"
+          },
+          "pin: no A/V latency compensation was added (out of scope)": {
+            "value": "pass",
+            "claim_basis": "observed"
+          }
+        },
+        "claim_verdict": {
+          "unittest suite (tests/, capped at 900 s; ~2.5 min)": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "assert: README carries the ratified chart and pill mockups verbatim": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "assert: the correction key follows the chart (no take: ignored; 1 moves the close; 2 and 3 drop and restart)": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "assert: the pill's hint is what the next press does, and reads as the mockups": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "assert: a moved close's red patch is concealed and no fiducial frame reaches the cut": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "assert: correct is the action's name and retake still works (config keys, command)": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "assert: sidecars written under C1a's retake rule render their recorded intervals": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "pin: files outside this session's change are byte-identical": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          },
+          "pin: no A/V latency compensation was added (out of scope)": {
+            "claim": "pass",
+            "verdict": "pass",
+            "agreement": "agree"
+          }
+        },
+        "reconciliation_parsed": true,
+        "validation_will_run": [
+          "python syntax of the changed .py files",
+          "unittest suite (tests/, capped at 900 s; ~2.5 min)",
+          "assert: README carries the ratified chart and pill mockups verbatim",
+          "assert: the correction key follows the chart (no take: ignored; 1 moves the close; 2 and 3 drop and restart)",
+          "assert: the pill's hint is what the next press does, and reads as the mockups",
+          "assert: a moved close's red patch is concealed and no fiducial frame reaches the cut",
+          "assert: correct is the action's name and retake still works (config keys, command)",
+          "assert: sidecars written under C1a's retake rule render their recorded intervals",
+          "pin: files outside this session's change are byte-identical",
+          "pin: no A/V latency compensation was added (out of scope)",
+          "exec bit: bin/peep is executable",
+          "claims reconciliation (diagnostic)"
+        ]
+      },
+      "scope_kind": "write-forecast",
+      "scope": [
+        "."
+      ],
+      "overridden_paths": [],
+      "overridden_path_sources": {},
+      "required_check_overrides": [],
+      "base_drift_overrides": [],
+      "sandbox_escaped": false,
+      "network_grant_exercised": false,
+      "sandbox_confined": true,
+      "sandbox_off_source": null,
+      "cost": {
+        "tokens_in": null,
+        "tokens_out": null,
+        "usd": null,
+        "model_tier": null
+      },
+      "change_paths": [
+        "README.md",
+        "bin/peep",
+        "tests/render_fixtures.py",
+        "tests/test_c1a_surface.py",
+        "tests/test_c1c_pill.py",
+        "tests/test_config.py",
+        "tests/test_correction.py",
+        "tests/test_correction_render.py",
+        "tests/test_events.py",
+        "tests/test_hotkeys.py",
+        "tests/test_render_plan.py",
+        "tests/test_segments.py",
+        "win/peep/agent.py",
+        "win/peep/agentcli.py",
+        "win/peep/catalog.py",
+        "win/peep/cli.py",
+        "win/peep/config.py",
+        "win/peep/configedit.py",
+        "win/peep/control.py",
+        "win/peep/events.py",
+        "win/peep/hotkeys.py",
+        "win/peep/pill.py",
+        "win/peep/recorder.py",
+        "win/peep/render.py"
+      ],
+      "feedback": {
+        "mechanical": {
+          "response_kind": "normal",
+          "schema_valid": true,
+          "mirror_agreement": {
+            "changes_to_files": true,
+            "files_to_changes": true
+          },
+          "claims_subset": true,
+          "provenance": {
+            "bale_version": "0.4.51",
+            "contract_docs": {
+              "AGENT.md": "5124250b3d6362ae362801f89e2c0498a6e493c638a398de2f4c3d13d6c12285",
+              "TARBALL.md": "c32a8dc8bbc01634a9a5bfcff2bc6240b835f3ff6c71144f2e5d651600a04112",
+              "DOCS.md": "90cc9aad0670610b7865a54db33975103580cdd3354d000b8db07f8a6e956d0c",
+              "CODE.md": "49a145323bfc472a22dd8be56565d6e7767fd1ffbd33c36cda95e7e3e149ab75",
+              "PLANNER.md": "22c4f52e73fde726b3ffab8256e2a957a18378093757f8882331315bbb2af82c"
+            },
+            "packer": "chordsphere",
+            "work_class": "code",
+            "checkpoint": null,
+            "checkpoint_scope_admitted": false,
+            "packed_at": "2026-10-07T23:10:30+00:00",
+            "base_files": {
+              ".gitignore": "be556e2cd3057567ca2806a9a3f877e080beede941b98dc77150b7813c20f40e",
+              "README.md": "321fb1c3ef27d9f9e57a897a7aff33d0aafa653ce9374a0d06e689574a19b475",
+              "bin/peep": "e6822339fc228fd1f3a5df0b4a1a32f449abea74b17bd95b9d08788ccd2b97b4",
+              "claude/responses/2026-10-05-engine-storage-core-002/notes.md": "5ac2235ed730692ab5fcfbb67c81a03676f2040d666b1b707cd73a53688424ed",
+              "claude/responses/2026-10-05-resident-agent-003/notes.md": "0026815638d659295deb1f405e76ef0149bbcf026c66a99a484a760f52ac0c86",
+              "claude/responses/2026-10-06-audio-pipeline-001/notes.md": "5c450d65a00a280e6d0cf4dbd764400f586033edb78898dcbce12ee823eaed5d",
+              "claude/responses/2026-10-06-stdin-shutdown-fix-002/notes.md": "22a750ad2e4f2571ddb39b8cb3b0235ccbf161b2c80ca852caa792b23bc033f9",
+              "claude/responses/2026-10-07-render-002/notes.md": "a84b54b9f198ffa589694da984fefbd1c8df2eb74ab0a4be11b46857ba2b3659",
+              "claude/responses/2026-10-07-session-events-001/notes.md": "143bf64277abacfdaa7dd2866ba5af9e7020daaf16e8bc3afc315b7c394b352b",
+              "claude/telemetry/2026-10-05-engine-storage-core-002.json": "3d19cdf2556dd26e6a4c669b7dfea5271783e5f46d3a6251d1665c0bf9f31d3c",
+              "claude/telemetry/2026-10-05-resident-agent-003.json": "4bbcc1f03086ad8bf59f22f8443ded8a894eee92af6244cac6e90136aa935cb9",
+              "claude/telemetry/2026-10-06-audio-pipeline-001.json": "ce4c3a3346bce7413b8797dfee70e9984bca8c816ad3d2239502d0b4fd722f1c",
+              "claude/telemetry/2026-10-06-stdin-shutdown-fix-002.json": "6a06dd15fa1c09e2113afe12e7c6154e0da64dd400b81b02dd8069b6e0c7f2e4",
+              "claude/telemetry/2026-10-07-render-002.json": "5c1015cb87e27451dff8445bb59f90dc8368820f733098689301dbee40d92211",
+              "claude/telemetry/2026-10-07-session-events-001.json": "e5cdf1361904ef94f592a836bbd5a1e575065f1fe51d0a631d28e1752eb3445a",
+              "pyproject.toml": "583f0f265e8cb543625e5679788544f772e185cde9fbf408b6b96e4010482af3",
+              "start.md": "8d7235777c4466098fcbee355c33af1a7224b8f7b7e845ee718d8f6d6442c682",
+              "tests/__init__.py": "fe4a4f8dfc75a518bc43601b626e0e4a1518959a3e008fad55d02ae22389c817",
+              "tests/fake_ffmpeg.py": "99dc59094121ee6ec58e908ccf37f21349350e5b817338f1326e6cd39e8dde5b",
+              "tests/fake_wasapi.py": "81775c198fb10dff823d09e4da45e4848d72bc812c77a7a4575f09492b79706f",
+              "tests/real_ffmpeg_scenario.py": "b3f9c141b4b13f1c0f50ca7a821659ca574cc7c65e21f1471db210d7157ab195",
+              "tests/render_fixtures.py": "992a8426b40be8bf10f060f36363fce8defd72e123991d958d9ae8ec93f745d8",
+              "tests/test_agent.py": "70ade9452cfdb1e2090090421009563810096d3de903c20588c4a7d1a0f337ac",
+              "tests/test_agentcli.py": "39dbda942870afed0ed085f7a57ae193cce86fa97a81a9bd78dff6acd3d702ef",
+              "tests/test_c1a_surface.py": "2a0a2aa81178b20bbf8bb2021cbaf7d284712f01a20397265b60616f8103c09a",
+              "tests/test_catalog.py": "e2adeb256ca2d7f5fff5e87acaba05fdd3c830f34f938528643de3f93b4cac6b",
+              "tests/test_cli.py": "771a05ae399eabe93db510117ea221b9ef0105ac9e9adc7c80f4d5f2b212ce0a",
+              "tests/test_config.py": "2ec1730ee0645616f5c1274319bed6324162a35fa53d769e9958a5b0c79f3fe6",
+              "tests/test_configedit.py": "84d42a305c6f58e977e237c1df87ff08035858bdac2c05e58d2ca45b54b7223e",
+              "tests/test_control.py": "abd0687a18df4b94d6e0bae4776b500f0cfed7e85726134f74322538ddc3dfed",
+              "tests/test_dialog.py": "19899e04598127a1730782fdc71c16a73d53f7175acd7f357b21aed7e6a3654b",
+              "tests/test_doctor.py": "35662168a6f1ece9d044fcd79b555fa13bff00b99c106987f67a1271de93380d",
+              "tests/test_events.py": "e434068f5c90b1367b003d5128759cfcaea58f675565b038fb5b36064c2944fa",
+              "tests/test_ffmpeg_cmd.py": "b75afca1b9a5021746f59a00de43f86f76032db8d5f4d7850b7d984e0bed8c8c",
+              "tests/test_hotkeys.py": "8a01301c2ba20ac22daf3133fcf225468a5fea51d72cf6621a9123ad8f04c374",
+              "tests/test_lifecycle.py": "1c8e2d9707589ab5cb5facac79207e932c6b27c9188b11ffff96216a82256711",
+              "tests/test_marks.py": "c2c7948e6bc56a6d5d6d3b39275bffe848eb13fd8a285bc760d2acae157ea5ce",
+              "tests/test_naming.py": "02245a325b8eccea642863658c9217d399b1c9057e4d32f1b52c50a5cd0cfde8",
+              "tests/test_naming_audit.py": "ccb1870b56cbe55d9ef8d806c2b305af0f2a6cca1f9abe9d27d811c27cb3cf27",
+              "tests/test_recorder.py": "c22fddb20967b92c3ef7d00b1150ecb9c6f03515c4d2883bf8ce5dc885166d88",
+              "tests/test_render_argv.py": "f76747fa455c9cb1bf33ec52596b94a5e1b5ec7ac81d8926c4af591ab05e4374",
+              "tests/test_render_detect.py": "36724ed74363f9b707d4f1d57d40359d65ac652f0fc6bc157afdd917afd11067",
+              "tests/test_render_plan.py": "eeaea42181c7a5b281b1565f5ecdf6e35d70eefd535b3ab6d04154de1d4d30f5",
+              "tests/test_render_run.py": "bbbaccc84ff6f0414e9409d3c1615c2d0ef93176d9dafebda02c72387e6249d0",
+              "tests/test_render_surface.py": "c31610fd0660512fd3b4d420cdd38128d81e76ecdb415a47730e76e6b829b861",
+              "tests/test_segments.py": "84a063c5f914b539a755ede45f4cd6afc2f241a6330a3cb7a3aec97a844ec024",
+              "tests/test_shim.py": "c046b38264ebea69a65023692a75113ff17aa341d7bf8000c6f933f2971874a9",
+              "tests/test_wasapi.py": "25243877be5d24e023d7f7abde2bb4789772548aac74670b3c1b7d503c312a4c",
+              "win/peep/__init__.py": "6e87c0cdb7018a8cfcb35ec7b5d0cb8aaee6b0b52a3b5a64dd61f7c01ee1bbd4",
+              "win/peep/__main__.py": "f5c32d04986abec782824be436da94704abd3a940faa65868b21928f00ef3e46",
+              "win/peep/agent.py": "c9e81a799626a16149601f1f170c1d133edfb2b9569a6d64c9ec7a5b1ee42b11",
+              "win/peep/agentcli.py": "cebc7127241946654e8c0a88597b1e6c8d2b5974697a4741240e0fc97471e772",
+              "win/peep/catalog.py": "a0bbe9a1ad555c550d4daa78ddf55faa5300589fdaced12b777fb7aad51f77f0",
+              "win/peep/cli.py": "dd5e8452cf001cf328e42af069801d52e675c1290a6e16526e546599259bd539",
+              "win/peep/config.py": "352426880bae88cb188907cb26d9914a4550e472117f29e25bb89ed384f0383d",
+              "win/peep/configedit.py": "808bc32f49bb9c0392fc003b62d4ee1940cfca45b4d93f2ff839b692d71db355",
+              "win/peep/control.py": "a7f74fd80681821938dd5be1e4616177ac8ef8091ffefcb7f9ad9aadb209d7de",
+              "win/peep/dialog.py": "5a2c0edb59f0f9021a413ef06af16db97ef5b98b98e7bf9da25fd57c909fbda4",
+              "win/peep/doctor.py": "8f250448a85c452777fe4e2c836803ee1d16b6846ff7e7c99ca7aa51952987c5",
+              "win/peep/events.py": "0be31c92f374aa00320d9ddbbf490c2da36a43aa7b966bb8bb602a40997540c2",
+              "win/peep/ffmpeg_cmd.py": "6d183d908087a8089d2fb1a67fabfdc5863b3359b3429668b528ed59a7257de2",
+              "win/peep/flash.py": "55135b2059ccc734eed2f3433aa9483419a14bc7e9ddfd12d1e9c80c2a605726",
+              "win/peep/hotkeys.py": "fe6a750794bba035361fffcab675e70f5133fd652c868ba80a9b6508b8921f13",
+              "win/peep/lifecycle.py": "bd21750ffb3c13c78f5e65b1a984f52bd2a580559b60602e76e1940d7d59237f",
+              "win/peep/logsetup.py": "f770126d30c631410f5a51816b7babf198b9e064c76c5949858ddb58ada38b1c",
+              "win/peep/naming.py": "c2a6401c0236b7e08c5f92bc2ef6654ca8576c1462f1067cee4bcd37d08a4454",
+              "win/peep/paths.py": "6d9956681597493d89f8193464204ba36d894dd62ae96513f886ac84e3f3157b",
+              "win/peep/pill.py": "a5da026f3f8eb8869bb26b5b8cf1dac7bef72d21e9218626b0853af8f6cf18dc",
+              "win/peep/recorder.py": "9b0d3363ca25b0fe574563ba2ac3fe9b776a689330967011773cdcb8a7b641cb",
+              "win/peep/render.py": "0958529ef6bfddca0ee7745365f55d8d73658ca1436a9c5e9ea58fa9e4f63977",
+              "win/peep/ui.py": "d52b367d1b0c7d7a763c07ab73043187c07f0a29ee4aca31a8ec51f724c194bc",
+              "win/peep/wasapi.py": "b7d8e38798e1ec028ba4a1e5f2f060dcd72b2940644f7f2f878116f41b9dec33",
+              "win/peep/winapi.py": "0224a454f2776585bdf760f80a910d5b61a1e3a62a19ef470c17f025e5eb20e8",
+              "win/peepw.py": "4d1235bb3d52360257fdb3aaf15cc64179150b380c83645236ccd924f1eaeb55"
+            },
+            "model_identity": "anthropic:claude-opus-5-5"
+          }
+        },
+        "self_reported": {
+          "assumptions": [
+            "The chart's 'previous accepted press' means any accepted press of any kind and source (take, correct, mark, pause, resume); take and pause keep C1a's per-chord debounce",
+            "The chart's 'no take yet ... or everything since the last take is already cut' has no reachable second case under the chart (every drop opens a fresh take), so the model treats 'no current take' generically",
+            "Take numbers shown on the pill and in feedback are take ids (dropped takes keep their number), as the ratified feedback mockup 'take 2 dropped \u00b7 take 3 started' implies"
+          ],
+          "judgment_calls": [
+            "One function (events.next_effect) decides every take and correct press and computes the pill's hint, so the two cannot disagree",
+            "Old sidecars need no migration: the record stores resolved boundaries; new sidecars add take_rule 'correction/1'",
+            "The render conceals every patch that is not a kept edge's own fiducial in the segment where it was shown (generalising C1b's mark concealment); the recorder now records fiducial.segment and older sidecars derive it from shown_qpc",
+            "The pill's open-take time grows from active.json's take_state.at on the agent's clock, not from captured seconds (recording_since is ~1 s off the model's frame clock)",
+            "Hint line content follows the ratified mockups state by state; trailing keys drop first past 44 characters; feedback for every press, pause/resume feedback only while that transition lasts",
+            "B's mark toast kept (B's ratified behaviour) though the pill's feedback now also announces marks"
+          ],
+          "budget_pressure": "none",
+          "includes_missing": [],
+          "compaction_occurred": {
+            "occurred": false,
+            "disclosure_ref": null
+          },
+          "docs_read": [
+            "manifest.json",
+            "AGENT.md (META through 11.2)",
+            "README.md (the request's brief)",
+            "TARBALL.md sections 1, 2, 5.1-5.4, 6, 7, 8, 10",
+            "claude/responses/2026-10-07-session-events-001/notes.md",
+            "claude/responses/2026-10-07-render-002/notes.md",
+            "README.md of the repo (commands, agent, editing, the cut, sidecar, tests, smoke checklist, troubleshooting)",
+            "tools/craft_response.py (usage, CLI and write path)",
+            "tools/response_lint.py (usage and the embedded response schema's feedback block)"
+          ],
+          "light_blocks": 0
+        }
+      },
+      "log": ".bale/logs/2026-10-07-correction-and-pill-003.log",
+      "clarification": {
+        "rounds": 0,
+        "records": []
+      },
+      "corrects": null,
+      "checkpoint": {
+        "configured": false
+      }
+    }
+  ],
+  "updated_at": "2026-10-08T00:51:11+00:00",
+  "outcome": "applied"
+}
