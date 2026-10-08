@@ -36,7 +36,7 @@ class ChordTest(unittest.TestCase):
         table = hk.table_from_agent_config(c.AgentConfig())
         self.assertEqual({a: ch.text for a, ch in table.items()},
                          {"record": "Ctrl+Alt+R", "mark": "Ctrl+Alt+M", "discard": "Ctrl+Alt+X",
-                          "pause": "Ctrl+Alt+P", "take": "Ctrl+Alt+T", "retake": "Ctrl+Alt+Backspace"})
+                          "pause": "Ctrl+Alt+P", "take": "Ctrl+Alt+T", "correct": "Ctrl+Alt+Backspace"})
         with self.assertRaisesRegex(hk.HotkeyError, re.escape("mark_hotkey and record_hotkey are both Ctrl+Alt+R")):
             hk.build_table({"record": "Ctrl+Alt+R", "mark": "alt+ctrl+r"})
         with self.assertRaisesRegex(hk.HotkeyError, "unknown hotkey action"):

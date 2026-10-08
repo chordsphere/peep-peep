@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 
 from peep import catalog
-from peep.events import MARK, RETAKE, TAKE, EventModel, Press
+from peep.events import CORRECT, MARK, TAKE, TAKE_RULE, EventModel, Press
 
 FPS = 30
 RECT = {"x": 0, "y": 1400, "w": 200, "h": 200}
@@ -33,17 +33,59 @@ def _flash(color: str, shown_qpc: float, launch: float) -> dict:
             "shown_qpc": round(shown_qpc, 6)}
 
 
+class C1aRetakeModel(EventModel):
+    """C1a's event model exactly as it shipped (2026-10-07-session-events-001),
+    frozen here so the render can be tested on the sidecars that rule wrote:
+    a retake discards the most recent take, open or closed, and opens a fresh
+    one at the press (undo depth one). Its records have kind "retake", action
+    "open", no `correction`, no `undo`, and no `take_rule` in the sidecar."""
+
+    def _correct(self, rec: dict) -> None:
+        last = self.takes[-1] if self.takes else None
+        if last is not None and last["discarded_by"] is None:
+            last["discarded_by"] = rec["id"]
+            last["status"] = "discarded"
+            rec["discarded_take"] = last["id"]
+        take = {"id": len(self.takes) + 1, "open": self._position(rec), "close": None, "discarded_by": None,
+                "status": "open"}
+        self.takes.append(take)
+        rec.update(accepted=True, action="open", take=take["id"], kind="retake")
+        rec.pop("requested_as", None)
+
+    def _take(self, rec: dict) -> None:
+        open_ = self.open_take()
+        if open_ is None:
+            take = {"id": len(self.takes) + 1, "open": self._position(rec), "close": None, "discarded_by": None,
+                    "status": "open"}
+            self.takes.append(take)
+            rec.update(accepted=True, action="open", take=take["id"])
+        else:
+            open_["close"] = self._position(rec)
+            open_["status"] = "closed"
+            rec.update(accepted=True, action="close", take=open_["id"])
+
+
 def build_sidecar(stem: str, durations: list, presses: list = (), *, collection: str = "inbox",
                   tracks: tuple = ("system",), flash: bool = True, base: float = 1000.0, gap: float = 20.0,
                   output_size: str = "2560x1600", pipeline: str = "qsv", clap: bool = True,
-                  status: str = "ok", serial_fiducials: bool = True) -> dict:
+                  status: str = "ok", serial_fiducials: bool = True, rule: str = "correction",
+                  source: str = "cli") -> dict:
     """A peep.sidecar/2 for a recording of len(durations) segments.
 
     presses: (kind, segment, media_s[, label]) for a press while segment k
-    records, or (kind, "paused", k[, label]) for one during the pause after
-    segment k. Kinds: take, retake, mark. Pauses happen between segments (a
-    pause press 0.5 s before each segment's end, a resume 1 s before the next
-    one's first frame), exactly as the recorder feeds the model.
+    records, (kind, "paused", k[, label]) for one during the pause after
+    segment k, or (kind, "resuming", k[, label]) for one made after the resume
+    press but before segment k+1's first frame: the model places it in the
+    pause, but the recorder handles it once k+1 is live and shows its patch
+    there, after the start flash; (kind, "held", k[, label]) for one made in
+    segment k after the pause press was accepted (0.3 s before its end): the
+    model places it in segment k, the recorder holds it over the pause and
+    shows its patch in k+1 too. Kinds: take, correct (or its alias retake),
+    mark. Pauses happen
+    between segments (a pause press 0.5 s before each segment's end, a resume
+    1 s before the next one's first frame), exactly as the recorder feeds the
+    model. rule "c1a": the sidecar C1a's retake rule wrote for the same
+    presses (C1aRetakeModel). source "hotkey" applies the debounce.
 
     serial_fiducials: as the recorder shows them, one after another. A patch
     is shown on the recorder's thread and holds it for 200 ms, and nothing is
@@ -51,7 +93,7 @@ def build_sidecar(stem: str, durations: list, presses: list = (), *, collection:
     or as soon as the previous fiducial is down, whichever is later. False
     draws every patch 50 ms after its press, overlapping (a stamp a render
     must not trust blindly)."""
-    model = EventModel(1.0)
+    model = C1aRetakeModel(1.0) if rule == "c1a" else EventModel(1.0)
     epochs, t = {}, base
     for k, d in enumerate(durations, 1):
         epochs[k] = t
@@ -61,17 +103,23 @@ def build_sidecar(stem: str, durations: list, presses: list = (), *, collection:
     marks, segments = [], []
     busy = {"until": 0.0}
 
-    def press(kind, qpc, label=""):
-        rec = model.press(Press(kind=kind, qpc=qpc, source="cli", label=label), qpc + 0.05)
-        live = rec.get("segment") is not None
-        if rec["accepted"] and kind in (TAKE, RETAKE, MARK) and live and flash:
-            color = {("take", "open"): BLUE, ("take", "close"): RED}.get((kind, rec["action"]))
-            color = YELLOW if kind == RETAKE else CYAN if kind == MARK else color
-            launch = epochs[rec["segment"]] - 0.1
+    def press(kind, qpc, label="", shown_in=None):
+        src = source if kind not in ("pause", "resume") else "cli"
+        rec = model.press(Press(kind=kind, qpc=qpc, source=src, label=label), qpc + 0.05)
+        seg_shown = shown_in if shown_in is not None else rec.get("segment")
+        k = CORRECT if rec["kind"] == "retake" else rec["kind"]
+        if rec["accepted"] and k in (TAKE, CORRECT, MARK) and seg_shown is not None and flash:
+            color = {("take", "open"): BLUE, ("take", "close"): RED}.get((k, rec["action"]))
+            color = YELLOW if k == CORRECT else CYAN if k == MARK else color
+            launch = epochs[seg_shown] - 0.1
             shown = max(qpc + 0.05, busy["until"]) if serial_fiducials else qpc + 0.05
             busy["until"] = shown + 0.21
             rec["fiducial"] = {**_flash(color, shown, launch), "style": "patch", "rect": dict(RECT),
-                               "screen": dict(SCREEN), "kind": f"{kind}-{rec['action']}" if kind == TAKE else kind}
+                               "screen": dict(SCREEN),
+                               "kind": f"{rec['kind']}-{rec['action']}" if rec["kind"] in (TAKE, CORRECT)
+                               else rec["kind"]}
+            if rule != "c1a":                        # C1c's recorder says where it showed the patch
+                rec["fiducial"]["segment"] = seg_shown
         if kind == MARK and rec["accepted"]:
             m = {"t": None, "label": label, "source": "cli", "flash": rec["fiducial"], "segment": rec.get("segment"),
                  "media_s": rec.get("media_s"), "event": rec["id"]}
@@ -87,6 +135,11 @@ def build_sidecar(stem: str, durations: list, presses: list = (), *, collection:
         model.set_paused(False)
         if k > 1:
             model.note_pause_capture(k - 1, epochs[k - 1] + durations[k - 2], e)
+            prev_end = epochs[k - 1] + durations[k - 2]
+            for n, p in enumerate(p for p in presses if p[1] == "held" and p[2] == k - 1):
+                press(p[0], prev_end - 0.3 + n * 0.05, p[3] if len(p) > 3 else "", shown_in=k)
+            for n, p in enumerate(p for p in presses if p[1] == "resuming" and p[2] == k - 1):
+                press(p[0], e - 0.4 + n * 0.08, p[3] if len(p) > 3 else "", shown_in=k)
         for p in sorted((p for p in presses if p[1] == k), key=lambda p: p[2]):
             press(p[0], e + p[2], p[3] if len(p) > 3 else "")
         last = k == len(durations)
@@ -128,6 +181,12 @@ def build_sidecar(stem: str, durations: list, presses: list = (), *, collection:
     summary = model.finish()
     sc.update(status="ok", duration_s=round(sum(durations), 3), segments=segments, events=model.events,
               takes=model.takes, pauses=model.pauses, summary=summary, marks=marks)
+    if rule == "c1a":
+        sc.pop("take_rule", None)
+        for t in sc["takes"]:
+            t.pop("undo", None)
+    else:
+        sc["take_rule"] = TAKE_RULE
     return sc
 
 
@@ -146,6 +205,18 @@ def write_recording(root: Path, sc: dict, *, collection: str | None = None) -> s
         rec["segments"] = len(sc["segments"])
     catalog.Catalog(Path(root)).append(rec)
     return sc["uid"]
+
+
+def _shown_segment(fid: dict, segments: list) -> int | None:
+    """Where a patch was on screen, from its own QPC stamp: the segment whose
+    first frame came before it and whose last came after (the fixture's own
+    reckoning, independent of the render's)."""
+    q = fid.get("shown_qpc")
+    for s in segments:
+        e = s.get("video_epoch_qpc_est")
+        if isinstance(q, (int, float)) and isinstance(e, (int, float)) and e <= q <= e + float(s["duration_s"]):
+            return s["index"]
+    return None
 
 
 def scene_for(sc: dict, speech: dict | None = None, *, noise: float = 0.0005, hide: tuple = (),
@@ -172,7 +243,7 @@ def scene_for(sc: dict, speech: dict | None = None, *, noise: float = 0.0005, hi
                 video.append({"t0": t0, "t1": t0 + 0.2, "color": rec["color"], "where": "full"})
         for ev in sc["events"]:
             fid = ev.get("fiducial")
-            if ev.get("segment") == k and fid and ("event", ev["id"]) not in hide:
+            if fid and _shown_segment(fid, sc["segments"]) == k and ("event", ev["id"]) not in hide:
                 t0 = fid["shown_qpc"] - e + LAG
                 video.append({"t0": t0, "t1": t0 + 0.2, "color": recolor.get(("event", ev["id"]), fid["color"]),
                               "where": "patch"})

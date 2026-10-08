@@ -1,9 +1,10 @@
-"""Session C1a's user-facing surface: the agent's pause / take / retake
-chords, the pill's PAUSED and take states, the dialog's status line and
-"saves as" preview, the WSL commands (`peep pause|resume|take|retake`, in
-the Windows CLI and the shim), the new chords and fiducial settings, and the
-corner patch geometry. Also the reproduction of the architect's reported
-overwrite, end to end through the agent and the dialog."""
+"""Session C1a's user-facing surface: the agent's pause / take / correct
+chords (C1c renamed retake to correct; the old name still works), the pill's
+PAUSED and take states, the dialog's status line and "saves as" preview, the
+WSL commands (`peep pause|resume|take|correct`, in the Windows CLI and the
+shim), the new chords and fiducial settings, and the corner patch geometry.
+Also the reproduction of the architect's reported overwrite, end to end
+through the agent and the dialog. (C1c's two-line pill: tests/test_c1c_pill.py.)"""
 
 import datetime as dt
 import json
@@ -37,11 +38,13 @@ class AgentEventChordTest(AgentHarness, unittest.TestCase):
         a.handle("record", CHROME)
         self.wait_live()
         a.handle("take", None, 123.25, "2026-10-07T10:00:00.000-04:00")
-        a.handle("retake", None, 125.5, "2026-10-07T10:00:02.250-04:00")
+        a.handle("correct", None, 125.5, "2026-10-07T10:00:02.250-04:00")
         a.handle("pause", None, 130.0, "2026-10-07T10:00:06.750-04:00")
+        a.handle("retake", None, 131.0, "2026-10-07T10:00:07.750-04:00")       # the old action name
         reqs = self.event_requests()
         self.assertEqual([(r["kind"], r["source"], r["requested_qpc"]) for r in reqs],
-                         [("take", "hotkey", 123.25), ("retake", "hotkey", 125.5), ("pause-toggle", "hotkey", 130.0)])
+                         [("take", "hotkey", 123.25), ("correct", "hotkey", 125.5), ("pause-toggle", "hotkey", 130.0),
+                          ("correct", "hotkey", 131.0)])
         self.assertEqual(reqs[0]["requested_at"], "2026-10-07T10:00:00.000-04:00")
         a.handle("record", None)
         self.assertTrue(self.ui.pump(lambda: a.session is None))
@@ -58,10 +61,10 @@ class AgentEventChordTest(AgentHarness, unittest.TestCase):
 
     def test_nothing_recording_says_so(self):
         a = self.make_agent()
-        for action in ("take", "retake", "pause"):
+        for action in ("take", "correct", "pause"):
             a.handle(action, None)
         self.assertEqual(self.ui.toasts, [f"nothing is recording, so there is nothing to {x}"
-                                          for x in ("take", "retake", "pause")])
+                                          for x in ("take", "correct", "pause")])
         self.assertEqual(self.event_requests(), [])
 
     def test_terminal_recordings_get_the_chords_too(self):
@@ -72,11 +75,13 @@ class AgentEventChordTest(AgentHarness, unittest.TestCase):
         self.control.release()
 
     def test_pill_shows_paused_and_take_state(self):
+        """A recorder that publishes no take_state (C1a's active.json): C1a's one line,
+        as a fallback, plus the paused hint (C1c spacing: one space after PAUSED)."""
         a = self.make_agent()
         self.control.claim({"uid": "u", "origin": "terminal", "status": "paused", "final": "f",
                             "captured_s": 72.4, "takes": 2, "take_open": False})
         a.tick()
-        self.assertEqual(self.ui.pills[-1], "❚❚ PAUSED  01:12  ○ 2 takes")
+        self.assertEqual(self.ui.pills[-1], "❚❚ PAUSED 01:12  ○ 2 takes\nP resume · nothing is recording")
         now = dt.datetime.now().astimezone()
         self.control.update_active(status="recording", captured_s=72.4, takes=3, take_open=True,
                                    recording_since=(now - dt.timedelta(seconds=10)).isoformat())
@@ -150,7 +155,7 @@ class PillAndDialogHelpersTest(unittest.TestCase):
         self.assertEqual(pill.pill_text("recording", 12.7), "● 00:12")                # B's pill, unchanged
         self.assertEqual(pill.pill_text("recording", 12.7, 1, True), "● 00:12  ◉ take 1")
         self.assertEqual(pill.pill_text("recording", 12.7, 2, False), "● 00:12  ○ 2 takes")
-        self.assertEqual(pill.pill_text("paused", 61), "❚❚ PAUSED  01:01")
+        self.assertEqual(pill.pill_text("paused", 61), "❚❚ PAUSED 01:01")          # C1c's mockup spacing
         self.assertEqual(pill.pill_text("resuming", None), "● resuming…")
         for state in ("paused", "pausing", "resuming"):
             self.assertIn(state, pill.COLORS)
@@ -198,10 +203,10 @@ class ChordAndConfigTest(unittest.TestCase):
         cfg = c.from_mapping({"agent": {"take_hotkey": "Ctrl+Alt+Num1", "retake_hotkey": "Ctrl+Alt+Num2",
                                         "pause_hotkey": "F13", "debounce_ms": 600}})
         table = hk.table_from_agent_config(cfg.agent)
-        self.assertEqual((table["take"].text, table["retake"].text, table["pause"].text),
-                         ("Ctrl+Alt+Num1", "Ctrl+Alt+Num2", "F13"))
+        self.assertEqual((table["take"].text, table["correct"].text, table["pause"].text),
+                         ("Ctrl+Alt+Num1", "Ctrl+Alt+Num2", "F13"))         # retake_hotkey: correct's old name
         self.assertEqual(cfg.agent.debounce_ms, 600)
-        with self.assertRaisesRegex(c.ConfigError, "retake_hotkey and take_hotkey|take_hotkey and retake_hotkey"):
+        with self.assertRaisesRegex(c.ConfigError, "correct_hotkey and take_hotkey|take_hotkey and correct_hotkey"):
             c.from_mapping({"agent": {"retake_hotkey": "Ctrl+Alt+T"}})
         with self.assertRaisesRegex(c.ConfigError, "debounce_ms"):
             c.from_mapping({"agent": {"debounce_ms": -1}})
@@ -211,8 +216,8 @@ class ChordAndConfigTest(unittest.TestCase):
             c.from_mapping({"flash": {"take_close_color": "#0000F0"}})
         with self.assertRaisesRegex(c.ConfigError, "too alike"):
             c.from_mapping({"flash": {"retake_color": "#FF00EE"}})          # magenta-ish: the start flash
-        cfg = c.from_mapping({"flash": {"retake_color": "#FF8000"}})
-        self.assertEqual(cfg.flash.retake_color, "#FF8000")
+        cfg = c.from_mapping({"flash": {"retake_color": "#FF8000"}})       # the old name of correct_color
+        self.assertEqual(cfg.flash.correct_color, "#FF8000")
 
     def test_patch_settings_are_validated(self):
         for data, why in (({"flash": {"mark_style": "strobe"}}, "mark_style"),
@@ -223,14 +228,14 @@ class ChordAndConfigTest(unittest.TestCase):
                 c.from_mapping(data)
 
     def test_template_documents_the_new_keys(self):
-        for key in ("pause_hotkey", "take_hotkey", "retake_hotkey", "debounce_ms", "take_open_color",
-                    "take_close_color", "retake_color", "mark_style", "patch_size_px", "patch_corner",
-                    "patch_margin_px"):
+        for key in ("pause_hotkey", "take_hotkey", "correct_hotkey", "debounce_ms", "take_open_color",
+                    "take_close_color", "correct_color", "mark_style", "patch_size_px", "patch_corner",
+                    "patch_margin_px", "pill_hints"):
             self.assertIn(f"# {key} = ", c.TEMPLATE)
 
 
 class PauseTakeCommandTest(CliHarness, unittest.TestCase):
-    """`peep pause|resume|take|retake` through cli.main, against a stand-in recorder
+    """`peep pause|resume|take|correct` (and `retake`) through cli.main, against a stand-in recorder
     thread that consumes the request and publishes its status the way the real one does."""
 
     def control(self):
@@ -251,7 +256,7 @@ class PauseTakeCommandTest(CliHarness, unittest.TestCase):
         return t
 
     def test_nothing_recording(self):
-        for cmd in ("pause", "resume", "take", "retake"):
+        for cmd in ("pause", "resume", "take", "correct", "retake"):
             code, _, err = self.run_cli(cmd)
             self.assertEqual(code, 1)
             self.assertIn("nothing is recording", err)
@@ -296,11 +301,20 @@ class PauseTakeCommandTest(CliHarness, unittest.TestCase):
         t.join(25)
         self.assertEqual(code, 0)
         self.assertIn("◉ take: 1 take(s), the last one open", out)
-        t = self.recorder(ctl, lambda c, r: (self.assertEqual(r["kind"], "retake"),
-                                             c.update_active(takes=1, take_open=True)))
+        def corrected(c, r):
+            self.assertEqual(r["kind"], "correct")                       # `retake` is written as correct
+            c.update_active(takes=1, take_open=True, feedback={
+                "seq": 2, "kind": "correct", "action": "dropped-take", "dropped": 1, "take": 2,
+                "ignored": None, "qpc": round(r["requested_qpc"], 6)})
+        t = self.recorder(ctl, corrected)
         code, out, _ = self.run_cli("retake")
         t.join(25)
-        self.assertIn("↺ retake: 1 take(s)", out)
+        self.assertIn("↺ correct: take 1 dropped · take 2 started; 1 take(s), the last one open", out)
+        t = self.recorder(ctl, lambda c, r: c.update_active(feedback={"seq": 3, "kind": "correct", "action": None,
+                                                                     "ignored": "nothing-to-correct", "qpc": -1.0}))
+        code, out, _ = self.run_cli("correct")                          # someone else's feedback: just the count
+        t.join(25)
+        self.assertIn("↺ correct: 1 take(s), the last one open", out)
         ctl.release()
 
     def test_rename_refuses_the_recording_in_progress(self):
@@ -326,14 +340,15 @@ class PauseTakeCommandTest(CliHarness, unittest.TestCase):
 class ShimCommandsTest(DispatchTest):
     def test_new_commands_pass_through(self):
         cfg = dict(CFG, app_wsl=str(self.tmp))
-        for argv in (["pause"], ["resume", "--no-wait"], ["take"], ["retake"]):
+        for argv in (["pause"], ["resume", "--no-wait"], ["take"], ["correct"], ["retake"]):
             with self.subTest(argv=argv), \
                     mock.patch.object(shim, "load_shim_config", return_value=cfg), \
                     mock.patch.object(shim, "autosync"), \
                     mock.patch.object(shim.subprocess, "call", return_value=0) as call:
                 self.assertEqual(self.run_main(*argv)[0], 0)
                 self.assertEqual(call.call_args.args[0][4:], argv)
-        self.assertIn("retake", shim.USAGE)
+        self.assertIn("correct", shim.USAGE)
+        self.assertIn("retake", shim.USAGE)                             # named as correct's alias
 
 
 if __name__ == "__main__":

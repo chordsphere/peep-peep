@@ -8,9 +8,17 @@ global hotkeys, the REC pill, the stop dialog, marks, and its own lifecycle.
   Ctrl+Alt+P   hard pause / resume (session C1a): capture stops, the next press opens a new segment
   Ctrl+Alt+T   take: open one, or close the open one (a blue / red corner patch)
   Ctrl+Alt+Backspace
-               retake: discard the most recent take, open a fresh one (a yellow corner patch)
+               correct (C1c; was retake): the chart's two-level undo of the current take,
+               moving its close here or dropping it and restarting (a yellow corner patch)
                (all three, like mark, act on any live recording through control files;
                the recorder decides them in events.EventModel, debounce included)
+
+The REC pill (C1c) is two lines: the state (time, take, kept time), then
+what each key does now, computed by events.next_effect from the take state
+the recorder publishes in active.json, the same function the recorder's
+event model decides presses with. After each press its feedback replaces the
+second line for 1.5 s. `[agent] pill_hints = false` keeps the first line only
+(feedback still shows). See pill.pill_lines.
 
 Threads: the Tk thread runs everything in this class (through ui.post /
 ui.every, serialised by the UI dispatcher); the hotkey listener thread
@@ -61,7 +69,8 @@ from . import render as render_mod
 from .catalog import write_json_atomic
 from .control import AgentAlreadyRunning, AgentControl, AlreadyRecording, Control
 from .logsetup import event
-from .pill import COLORS, pill_text
+from . import pill as pill_mod
+from .pill import COLORS
 from .recorder import RecordError, RecordRequest
 from .winapi import ForegroundInfo
 
@@ -123,7 +132,8 @@ TICK_MS = 250
 CONFIG_CHECK_EVERY = 8          # ticks: the config file's mtime is checked every 2 s
 STOP_REASONS = {"stop": "hotkey", "discard": "hotkey-discard", "exit": "agent-exit"}
 # Session C1a: hotkey action -> the control-file request it writes (the pause chord toggles).
-EVENT_ACTIONS = {"pause": "pause-toggle", "take": "take", "retake": "retake"}
+EVENT_ACTIONS = {"pause": "pause-toggle", "take": "take", "correct": "correct",
+                 "retake": "correct"}        # C1c renamed retake; the old action name still works
 PILL_STATES = ("starting", "recording", "pausing", "paused", "resuming", "stopping")
 
 
@@ -178,6 +188,9 @@ class Agent:
         self.render_queue = render_queue          # render.RenderQueue (run_agent); None: no background renders
         self.render_state: dict | None = None     # the render in progress, for agent.json
         self._render_hints: dict = {}             # uid -> {"summary", "segments"}, from the recording's result
+        self._feedback_key = None                 # (uid, seq) of the last press feedback seen in active.json
+        self._feedback: dict | None = None        # ...and the feedback itself, shown until _feedback_until
+        self._feedback_until: _dt.datetime | None = None
         self._mtime = self.config_mtime()
         self.config_loaded_at = catalog.now_iso()
 
@@ -233,7 +246,7 @@ class Agent:
     # -- hotkeys (listener thread -> UI thread) ---------------------------------------
 
     def on_hotkey(self, action: str, foreground: ForegroundInfo | None) -> None:
-        # Stamped here, on the listener thread the instant WM_HOTKEY arrives: the take/retake
+        # Stamped here, on the listener thread the instant WM_HOTKEY arrives: the take/correct
         # event's time is the press, not when the UI thread or the recorder got to it.
         self.ui.post(self.handle, action, foreground, time.perf_counter(), catalog.now_iso())
 
@@ -269,7 +282,7 @@ class Agent:
             event(log, logging.WARNING, "agent.unknown_action", action=action)
 
     def _on_event(self, action: str, qpc: float | None, at: str | None) -> None:
-        """Pause / take / retake: a request for whichever recording is live (the
+        """Pause / take / correct: a request for whichever recording is live (the
         agent's own or a terminal one). The recorder decides it (debounce, take
         state), shows the corner patch and publishes the result for the pill."""
         if self.session is not None and self.session.stop_kind is not None:
@@ -611,24 +624,53 @@ class Agent:
             if status not in PILL_STATES:
                 status = "recording"
             captured = info.get("captured_s") if isinstance(info.get("captured_s"), (int, float)) else 0.0
+            now = self.now()
             since = _parse_iso(info.get("recording_since"))
             if status == "recording" and since:
-                elapsed = captured + (self.now() - since).total_seconds()
+                elapsed = captured + (now - since).total_seconds()
             else:
                 elapsed = captured
-            self._show_pill(status, elapsed, int(info.get("takes") or 0), bool(info.get("take_open")))
+            state = info.get("take_state") if isinstance(info.get("take_state"), dict) else None
+            if state is not None:          # an open take keeps growing between presses (C1c)
+                at = _parse_iso(state.get("at"))
+                state = pill_mod.live_take_state(state, (now - at).total_seconds() if at else None,
+                                                 recording=status == "recording")
+            self._show_pill(status, elapsed, int(info.get("takes") or 0), bool(info.get("take_open")),
+                            state=state, feedback=self._fresh_feedback(info, now))
         elif self.session is not None:
             self._show_pill("stopping" if self.session.stop_kind else "starting", None)
         else:
             self._show_pill(None, None)
 
-    def _show_pill(self, status: str | None, elapsed: float | None, takes: int = 0, take_open: bool = False) -> None:
+    def _fresh_feedback(self, info: dict, now: _dt.datetime) -> dict | None:
+        """The last press's feedback from active.json, for FEEDBACK_S after this
+        agent first saw it (each press has its own seq, so each shows once). One
+        already older than that when first seen (an agent started mid-recording
+        finds the last press's) is not shown at all."""
+        fb = info.get("feedback")
+        if isinstance(fb, dict) and fb.get("seq") is not None:
+            key = (info.get("uid"), info.get("pid"), fb.get("seq"))
+            if key != self._feedback_key:
+                at = _parse_iso(fb.get("at"))
+                age = (now - at).total_seconds() if at else 0.0
+                stale = age > pill_mod.FEEDBACK_S + pill_mod.FEEDBACK_LATE_S
+                self._feedback_key, self._feedback = key, (None if stale else fb)
+                self._feedback_until = now + _dt.timedelta(seconds=pill_mod.FEEDBACK_S)
+                event(log, logging.INFO, "agent.pill_feedback", kind=fb.get("kind"), action=fb.get("action"),
+                      ignored=fb.get("ignored"), seq=fb.get("seq"), age_s=round(age, 2), shown=not stale)
+        if self._feedback is not None and self._feedback_until is not None and now < self._feedback_until:
+            return self._feedback
+        return None
+
+    def _show_pill(self, status: str | None, elapsed: float | None, takes: int = 0, take_open: bool = False,
+                   state: dict | None = None, feedback: dict | None = None) -> None:
         ag = self.cfg.agent
         if status is None or not ag.pill or self.pill_problem:
             self.ui.pill(None)
             return
-        if not self.ui.pill(pill_text(status, elapsed, takes, take_open), COLORS[status], ag.pill_position,
-                            ag.pill_margin_px):
+        text = pill_mod.pill_lines(status, elapsed, state, pill_mod.key_labels(ag), hints=ag.pill_hints,
+                                   feedback=feedback, takes=takes, take_open=take_open)
+        if not self.ui.pill(text, COLORS[status], ag.pill_position, ag.pill_margin_px):
             self._pill_failed()
 
     def _pill_failed(self) -> None:

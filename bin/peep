@@ -21,8 +21,8 @@ Windows side. What the shim does itself:
   * doctor    shim-side checks (python.exe, installed copy, PATH) before
               the Windows-side doctor
 
-Commands: rec, stop, mark, pause, resume, take, retake, render, ls, open, rename, doctor, config, paths,
-agent, install, help.
+Commands: rec, stop, mark, pause, resume, take, correct (alias retake), render, ls, open, rename, doctor,
+config, paths, agent, install, help.
 Environment: PEEP_PYTHON (default python.exe), PEEP_NO_AUTOSYNC=1,
 PEEP_REC_NO_SETSID=1 (keep `rec`'s child in this terminal's session).
 
@@ -54,8 +54,8 @@ from pathlib import Path
 REPO = Path(os.path.realpath(__file__)).parent.parent
 WIN_SRC = REPO / "win"
 APP_MARKER = "INSTALLED.json"
-WIN_COMMANDS = ("rec", "stop", "mark", "pause", "resume", "take", "retake", "render", "ls", "open", "rename",
-                "doctor", "config", "paths", "agent")
+WIN_COMMANDS = ("rec", "stop", "mark", "pause", "resume", "take", "correct", "retake", "render", "ls", "open",
+                "rename", "doctor", "config", "paths", "agent")
 USAGE = """\
 usage: peep <command> [args]
 
@@ -68,7 +68,8 @@ usage: peep <command> [args]
   mark [--label TEXT]     drop a mark (cyan corner patch + sidecar entry) in the running recording
   pause / resume          hard pause: capture stops (the segment is saved); resume starts the next segment
   take                    open a take, or close the open one (only takes survive the cut)
-  retake                  discard the most recent take and open a fresh one now
+  correct                 correct the current take (also `retake`): a closed take's close moves here the
+                          first time; otherwise the take is dropped and a fresh one opens here
   render [last|STEM] [--force] [--dry-run]
                           the cut, <stem>.cut.mp4 beside the original: flashes trimmed, takes kept,
                           segments joined, seams snapped and crossfaded (the original is never changed)
@@ -88,7 +89,7 @@ usage: peep <command> [args]
   agent install           start the hotkey agent at every login (and now); agent uninstall undoes it
   agent start|stop|restart|status|reload
                           Ctrl+Alt+R record/stop (then name it), Ctrl+Alt+M mark, Ctrl+Alt+X discard,
-                          Ctrl+Alt+P pause/resume, Ctrl+Alt+T take, Ctrl+Alt+Backspace retake
+                          Ctrl+Alt+P pause/resume, Ctrl+Alt+T take, Ctrl+Alt+Backspace correct
                           (every peep command syncs the Windows copy first; `agent restart` loads it)
 """
 

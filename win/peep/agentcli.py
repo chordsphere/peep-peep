@@ -207,7 +207,7 @@ def cmd_install(args, cfg) -> int:
     ag = cfg.agent
     _out("  the agent will start at every login (hotkeys: "
          f"{ag.record_hotkey} record/stop, {ag.mark_hotkey} mark, {ag.discard_hotkey} discard, "
-         f"{ag.pause_hotkey} pause/resume, {ag.take_hotkey} take, {ag.retake_hotkey} retake)")
+         f"{ag.pause_hotkey} pause/resume, {ag.take_hotkey} take, {ag.correct_hotkey} correct)")
     if args.no_start:
         return 0
     args.wait = 15.0

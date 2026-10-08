@@ -111,7 +111,7 @@ class AgentConfigTest(unittest.TestCase):
                                         "dialog": False, "hotkey_retry_s": 0}, "flash": {"mark_color": "#FF8000"}})
         self.assertEqual((cfg.agent.record_hotkey, cfg.agent.pill, cfg.agent.pill_position, cfg.agent.dialog),
                          ("Ctrl+Shift+F9", False, "bottom-left", False))
-        self.assertEqual(cfg.flash.mark_color, "#FF8000")   # (C1a: yellow is now the retake patch)
+        self.assertEqual(cfg.flash.mark_color, "#FF8000")   # (C1a: yellow is the retake, now correct, patch)
 
     def test_invalid_agent_values(self):
         for data, why in (({"agent": {"pill_position": "middle"}}, "pill_position"),

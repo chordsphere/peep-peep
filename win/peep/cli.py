@@ -9,7 +9,8 @@ run directly from any Windows console.
   mark [--label TEXT]              drop a mark in the running recording (session B)
   pause [--no-wait] | resume [--no-wait]
                                    hard pause: capture stops; resume opens the next segment (C1a)
-  take | retake                    open/close a take; discard the last take and open a fresh one (C1a)
+  take | correct                   open/close a take; correct the current take: move its close here,
+                                   or drop it and restart it (C1c's chart; `retake` is an alias)
   agent VERB                       the resident hotkey agent; see agentcli.py (session B)
   render [REF] [--force] [--dry-run]
                                    the cut, <stem>.cut.mp4, from the event record (session C1b)
@@ -43,7 +44,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import __version__, agentcli, catalog, config as config_mod, configedit, naming, paths
+from . import __version__, agentcli, catalog, config as config_mod, configedit, naming, paths, pill
 from .control import AlreadyRecording, Control
 from .logsetup import configured_log_path, event, setup_logging
 
@@ -96,7 +97,9 @@ def build_parser() -> argparse.ArgumentParser:
         pr.add_argument("--no-wait", action="store_true", help="return as soon as the request is written")
         pr.add_argument("--timeout", type=float, default=60.0, help="seconds to wait for it to take effect")
     sub.add_parser("take", help="open a take, or close the open one (only takes survive the cut)")
-    sub.add_parser("retake", help="discard the most recent take (open or closed) and open a fresh one now")
+    sub.add_parser("correct", aliases=["retake"],
+                   help="correct the current take: a closed take's close moves here (the first time); "
+                        "otherwise the take is dropped and a fresh one opens here")
 
     ls = sub.add_parser("ls", help="list recordings from the catalog")
     ls.add_argument("--collection", "-c")
@@ -372,10 +375,12 @@ def cmd_pause_resume(args, cfg) -> int:
 
 
 def cmd_take(args, cfg, wait_s: float = 3.0) -> int:
-    """`peep take` / `peep retake` (session C1a). Once the recorder has consumed
-    the request (it polls every 100 ms), reports the take count it published."""
+    """`peep take` / `peep correct` (session C1a; C1c's correction, `retake` its
+    alias). Once the recorder has consumed the request (it polls every 100 ms),
+    reports what it did: for a correction the feedback the pill shows (moved
+    close, dropped take, or why it was ignored), then the take count."""
     ctl = _control()
-    kind = args.command
+    kind = "correct" if args.command in ("correct", "retake") else args.command
     try:
         req = ctl.request_event(kind, "cli")
     except LookupError as exc:
@@ -398,7 +403,18 @@ def cmd_take(args, cfg, wait_s: float = 3.0) -> int:
     else:
         where = ""
     state = "open" if now.get("take_open") else "closed"
-    _out(f"{'↺ retake' if kind == 'retake' else '◉ take'}: {now.get('takes', 0)} take(s), the last one {state}{where}")
+    if not now.get("takes") and not now.get("take_open"):
+        counts = f"no take yet{where}"
+    else:
+        counts = f"{now.get('takes', 0)} take(s), the last one {state}{where}"
+    if kind != "correct":
+        _out(f"◉ take: {counts}")
+        return 0
+    fb = now.get("feedback") if isinstance(now.get("feedback"), dict) else None
+    mine = fb is not None and isinstance(fb.get("qpc"), (int, float)) \
+        and abs(fb["qpc"] - float(req["requested_qpc"])) < 1e-5
+    said = pill.feedback_text(fb, pill.WORD_LABELS) if mine else None
+    _out(f"↺ correct: {said}; {counts}" if said else f"↺ correct: {counts}")
     return 0
 
 
@@ -608,7 +624,8 @@ def cmd_paths(args, cfg) -> int:
 
 
 COMMANDS = {"rec": cmd_rec, "stop": cmd_stop, "mark": cmd_mark, "pause": cmd_pause_resume,
-            "resume": cmd_pause_resume, "take": cmd_take, "retake": cmd_take, "render": cmd_render,
+            "resume": cmd_pause_resume, "take": cmd_take, "correct": cmd_take, "retake": cmd_take,
+            "render": cmd_render,
             "ls": cmd_ls, "open": cmd_open,
             "rename": cmd_rename, "doctor": cmd_doctor, "config": cmd_config, "paths": cmd_paths,
             "agent": agentcli.cmd_agent}

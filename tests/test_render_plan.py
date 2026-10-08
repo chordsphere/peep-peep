@@ -100,8 +100,11 @@ class TakesTest(unittest.TestCase):
         self.assertEqual(first.start.event, sc["takes"][0]["open"]["event"])
 
     def test_retake_discards_and_its_yellow_patch_opens_the_kept_take(self):
+        # A sidecar C1a's retake rule wrote (C1c changed the rule; such files render as recorded).
+        # The same presses under C1c's chart: tests/test_correction_render.py.
         sc = rf.build_sidecar(STEM, [30.0], [("take", 1, 3.0), ("retake", 1, 8.0), ("take", 1, 15.0),
-                                              ("retake", 1, 18.0), ("take", 1, 25.0)])
+                                              ("retake", 1, 18.0), ("take", 1, 25.0)], rule="c1a")
+        self.assertNotIn("take_rule", sc)
         p = plan_of(sc)
         self.assertEqual(sc["summary"]["takes_discarded"], 2)
         self.assertEqual([(i.start_s, i.end_s, i.take) for i in p.intervals], [(18.0, 25.0, 3)])
@@ -131,8 +134,8 @@ class TakesTest(unittest.TestCase):
 
     def test_every_take_discarded_leaves_nothing(self):
         p = plan_of(rf.build_sidecar(STEM, [20.0], [("take", 1, 3.0), ("take", 1, 6.0), ("retake", 1, 9.0),
-                                                     ("retake", 1, 12.0)]))
-        # the second retake discards the take the first opened, and opens one that runs to the end
+                                                     ("retake", 1, 12.0)], rule="c1a"))
+        # (C1a's rule) the second retake discards the take the first opened, and opens one that runs to the end
         self.assertEqual([(i.start_s, i.end_s) for i in p.intervals], [(12.0, 20.0)])
         sc = rf.build_sidecar(STEM, [20.0], [("take", 1, 3.0), ("take", 1, 6.0)])
         sc["takes"][0].update(discarded_by=99, status="discarded")

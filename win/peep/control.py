@@ -18,8 +18,8 @@ In `paths.state_dir()`:
                    file per request, so two presses inside one poll interval
                    are two marks, not one.
   event-<ns>-<pid>.json
-                   session C1a: one file per take / retake / pause / resume
-                   request (`peep take|retake|pause|resume`, the agent's
+                   session C1a: one file per take / correct / pause / resume
+                   request (`peep take|correct|pause|resume`, the agent's
                    chords), same pattern as marks. Each carries the
                    requester's QPC stamp (`requested_qpc`), so the recorder
                    places the press where it happened, not where it was polled.
@@ -52,7 +52,8 @@ ACTIVE = "active.json"
 STOP = "stop-request"
 MARK_GLOB = "mark-*.json"
 EVENT_GLOB = "event-*.json"
-EVENT_KINDS = ("take", "retake", "pause", "resume", "pause-toggle")
+EVENT_KINDS = ("take", "correct", "pause", "resume", "pause-toggle")
+EVENT_ALIASES = {"retake": "correct"}       # C1c renamed it; the old name is accepted and written as the new
 AGENT = "agent.json"
 AGENT_COMMAND = "agent-command"
 AGENT_COMMANDS = ("stop", "reload")
@@ -225,10 +226,11 @@ class Control:
         return req
 
     def request_event(self, kind: str, source: str, *, qpc: float | None = None, at: str | None = None) -> dict:
-        """Ask the live recorder for a take / retake / pause / resume / pause-toggle
-        (session C1a). Raises LookupError if none is live. `qpc`/`at` are the
-        press instant when the caller stamped it earlier (the agent stamps the
-        hotkey the moment it arrives); otherwise now."""
+        """Ask the live recorder for a take / correct / pause / resume / pause-toggle
+        (session C1a; `retake` is accepted for correct). Raises LookupError if
+        none is live. `qpc`/`at` are the press instant when the caller stamped it
+        earlier (the agent stamps the hotkey the moment it arrives); otherwise now."""
+        kind = EVENT_ALIASES.get(kind, kind)
         if kind not in EVENT_KINDS:
             raise ValueError(f"unknown event {kind!r} (known: {', '.join(EVENT_KINDS)})")
         info = self.live_recording()
