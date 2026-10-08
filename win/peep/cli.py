@@ -11,6 +11,9 @@ run directly from any Windows console.
                                    hard pause: capture stops; resume opens the next segment (C1a)
   take | correct                   open/close a take; correct the current take: move its close here,
                                    or drop it and restart it (C1c's chart; `retake` is an alias)
+  learn start|end [--in S] | forget start|end
+                                   auto-takes (C1d): the agent learns the screen now showing as this
+                                   recording's start / end screen (after S seconds), or forgets it
   agent VERB                       the resident hotkey agent; see agentcli.py (session B)
   render [REF] [--force] [--dry-run]
                                    the cut, <stem>.cut.mp4, from the event record (session C1b)
@@ -97,6 +100,13 @@ def build_parser() -> argparse.ArgumentParser:
         pr.add_argument("--no-wait", action="store_true", help="return as soon as the request is written")
         pr.add_argument("--timeout", type=float, default=60.0, help="seconds to wait for it to take effect")
     sub.add_parser("take", help="open a take, or close the open one (only takes survive the cut)")
+    ln = sub.add_parser("learn", help="auto-takes: learn the screen now showing as this recording's start or end "
+                                      "screen (the agent samples it; Ctrl+Alt+[ / Ctrl+Alt+] do the same)")
+    ln.add_argument("screen", choices=("start", "end"))
+    ln.add_argument("--in", dest="delay", type=float, default=0.0, metavar="S",
+                    help="wait S seconds first, so you can bring the screen up (default 0)")
+    fg = sub.add_parser("forget", help="auto-takes: stop using the learned start or end screen from now on")
+    fg.add_argument("screen", choices=("start", "end"))
     sub.add_parser("correct", aliases=["retake"],
                    help="correct the current take: a closed take's close moves here (the first time); "
                         "otherwise the take is dropped and a fresh one opens here")
@@ -418,6 +428,46 @@ def cmd_take(args, cfg, wait_s: float = 3.0) -> int:
     return 0
 
 
+def cmd_learn_forget(args, cfg, wait_s: float = 5.0) -> int:
+    """`peep learn start|end [--in S]` / `peep forget start|end` (session C1d), for
+    terminal recordings: the agent does the sampling, so the request goes to it
+    (agent-command), and the answer is the feedback the recorder publishes for
+    the pill (`⇥ end screen learned · take 2 closed`)."""
+    from . import winapi
+    from .control import AgentControl
+    if not cfg.auto_takes.enabled:
+        _err("auto-takes are off ([auto_takes] enabled = false)")
+        return 1
+    ctl = _control()
+    info = ctl.live_recording()
+    if info is None:
+        _err("nothing is recording: a learned screen belongs to one recording")
+        return 1
+    actl = AgentControl(paths.state_dir(), winapi.pid_alive)
+    if actl.live() is None:
+        _err("the peep agent is not running, and it is what samples the screen (`peep agent start`)")
+        return 1
+    if args.command == "learn" and args.delay > 0:
+        _out(f"learning the {args.screen} screen in {args.delay:g} s: bring it up now")
+        time.sleep(args.delay)
+    before = (ctl.read_active() or {}).get("feedback") or {}
+    actl.send(f"{args.command} {args.screen}")
+    deadline = time.monotonic() + wait_s + cfg.auto_takes.learn_wait_ms / 1000
+    while time.monotonic() < deadline:
+        now = ctl.read_active() or {}
+        fb = now.get("feedback") if isinstance(now.get("feedback"), dict) else {}
+        if fb.get("seq") != before.get("seq") and fb.get("kind") == args.command and fb.get("screen") == args.screen:
+            text = pill.feedback_text(fb, pill.WORD_LABELS) or f"{args.command} {args.screen}: done"
+            _out(text)
+            return 1 if fb.get("ignored") else 0
+        if int(now.get("pid", 0)) != int(info.get("pid", 0)):
+            _err(f"the recording ended before the {args.screen} screen was {args.command}ed")
+            return 1
+        time.sleep(0.1)
+    _err(f"no answer within {wait_s:g} s; the agent shows why on screen (and in agent.log)")
+    return 1
+
+
 def format_duration(seconds) -> str:
     if not isinstance(seconds, (int, float)):
         return "?"
@@ -625,6 +675,7 @@ def cmd_paths(args, cfg) -> int:
 
 COMMANDS = {"rec": cmd_rec, "stop": cmd_stop, "mark": cmd_mark, "pause": cmd_pause_resume,
             "resume": cmd_pause_resume, "take": cmd_take, "correct": cmd_take, "retake": cmd_take,
+            "learn": cmd_learn_forget, "forget": cmd_learn_forget,
             "render": cmd_render,
             "ls": cmd_ls, "open": cmd_open,
             "rename": cmd_rename, "doctor": cmd_doctor, "config": cmd_config, "paths": cmd_paths,

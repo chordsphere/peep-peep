@@ -8,8 +8,8 @@ skip AGENT.md calls a bug.
 
 Sections:
   1. Defaults + dataclasses     (~line 25)
-  2. Loading + validation       (~line 163)
-  3. Template                   (~line 330)
+  2. Loading + validation       (~line 220)
+  3. Template                   (~line 470)
 """
 
 from __future__ import annotations
@@ -140,6 +140,29 @@ class AgentConfig:
     pill_margin_px: int = 24
     pill_hints: bool = True              # C1c: the pill's second line, what each key does now; false: one line
                                          # (each press's 1.5 s feedback still shows)
+    # Session C1d (auto-takes): teach the screen now on screen as this recording's start / end screen.
+    # The probe (2026-10-08) found both free; Ctrl+Alt+Home/End were free too, but not comfortable.
+    # Ctrl+Alt+Space stays reserved for C1e's expanded pill.
+    learn_start_hotkey: str = "Ctrl+Alt+["   # a start screen: a take opens when it goes away
+    learn_end_hotkey: str = "Ctrl+Alt+]"     # an end screen: it closes the open take at its first frame
+
+
+@dataclass(frozen=True)
+class AutoTakesConfig:
+    """Session C1d: the agent's live sampler and how it matches a learned screen.
+    The thresholds come from the probe's measurements on real pages (2026-10-08;
+    screens.py has the numbers): GDI leaves the cursor out, hover effects moved a
+    page by mad <= 4.9, a three-line scroll by 10.5-22."""
+    enabled: bool = True                 # false: the learn keys say so and nothing is sampled
+    sample_hz: float = 4.0               # thumbnails a second while a screen is learned (13 ms CPU each, probe)
+    thumb_width: int = 64                # thumbnail width; its height follows the screen (64x40 at 2560x1600)
+    match_mad: float = 8.0               # a sample matches at mean |difference| <= this ...
+    match_changed_pct: float = 8.0       # ... and at most this % of pixels changed (by more than changed_level)
+    miss_mad: float = 12.0               # a clear miss above this mean |difference| ...
+    miss_changed_pct: float = 15.0       # ... or above this % changed; in between: neither (hysteresis band)
+    changed_level: int = 24              # a pixel counts as changed past this difference (0..255)
+    hysteresis: int = 2                  # samples in a row to appear / to go away
+    learn_wait_ms: int = 1000            # a learn press waits up to this for the screen to hold still
 
 
 @dataclass(frozen=True)
@@ -157,6 +180,10 @@ class RenderConfig:
     silence_keep_ms: int = 250           # silence left before the first sound / after the last one
     min_interval_ms: int = 250           # a kept piece shorter than this after trimming is dropped (and said so)
     av_calibration: str = "measure"      # measure (record the clap residual) | apply (also correct it) | off
+    # Session C1d: a screen boundary is refined to the exact frame by comparing decoded thumbnails.
+    screen_slack_mad: float = 6.0        # extra mad allowed between a decoded frame and the live (GDI) reference
+    screen_slack_pct: float = 6.0        # ... and extra % changed (probe: GDI vs ddagrab mad 3.5 before encoding)
+    screen_lookback_s: float = 120.0     # how far back a screen learned while showing is followed to its first frame
 
 
 @dataclass(frozen=True)
@@ -171,6 +198,7 @@ class Config:
     ffmpeg: FfmpegConfig = field(default_factory=FfmpegConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     render: RenderConfig = field(default_factory=RenderConfig)
+    auto_takes: AutoTakesConfig = field(default_factory=AutoTakesConfig)
     source: str = "defaults"             # where this config came from (path or "defaults"); not a TOML key
 
     def root_path(self) -> Path:
@@ -204,7 +232,8 @@ class ConfigError(ValueError):
 
 
 _SECTIONS = {"video": VideoConfig, "audio": AudioConfig, "flash": FlashConfig,
-             "output": OutputConfig, "ffmpeg": FfmpegConfig, "agent": AgentConfig, "render": RenderConfig}
+             "output": OutputConfig, "ffmpeg": FfmpegConfig, "agent": AgentConfig, "render": RenderConfig,
+             "auto_takes": AutoTakesConfig}
 PILL_POSITIONS = ("top-right", "top-left", "top-center", "bottom-right", "bottom-left", "bottom-center")
 PATCH_CORNERS = ("auto", "top-left", "top-right", "bottom-left", "bottom-right")
 MARK_STYLES = ("patch", "full")
@@ -308,6 +337,28 @@ def validate(cfg: Config) -> None:
         raise ConfigError(f"log_level must be DEBUG/INFO/WARNING/ERROR, got {cfg.log_level!r}")
     validate_agent(cfg.agent)
     validate_render(cfg.render)
+    validate_auto_takes(cfg.auto_takes)
+
+
+def screen_thresholds(at: "AutoTakesConfig"):
+    """The sampler's screens.Thresholds from [auto_takes]."""
+    from . import screens
+    return screens.Thresholds(match_mad=at.match_mad, match_changed_pct=at.match_changed_pct,
+                              miss_mad=at.miss_mad, miss_changed_pct=at.miss_changed_pct,
+                              changed_level=at.changed_level, hysteresis=at.hysteresis)
+
+
+def validate_auto_takes(at: "AutoTakesConfig") -> None:
+    if not 0.5 <= at.sample_hz <= 10.0:
+        raise ConfigError(f"auto_takes.sample_hz must be 0.5..10, got {at.sample_hz}")
+    if not 16 <= at.thumb_width <= 160:
+        raise ConfigError(f"auto_takes.thumb_width must be 16..160, got {at.thumb_width}")
+    if not 100 <= at.learn_wait_ms <= 5000:      # at least one step: "stable" needs two samples to compare
+        raise ConfigError(f"auto_takes.learn_wait_ms must be 100..5000, got {at.learn_wait_ms}")
+    try:
+        screen_thresholds(at).validate()
+    except ValueError as exc:
+        raise ConfigError(f"auto_takes: {exc}") from exc
 
 
 def validate_render(r: "RenderConfig") -> None:
@@ -317,7 +368,8 @@ def validate_render(r: "RenderConfig") -> None:
         raise ConfigError(f"render.av_calibration must be one of {AV_CALIBRATION}, got {r.av_calibration!r}")
     checks = (("search_s", 0.2, 5.0), ("snap_ms", 0, 2000), ("crossfade_ms", 0, 500),
               ("silence_db", -90.0, -10.0), ("silence_max_trim_ms", 0, 10000), ("silence_keep_ms", 0, 5000),
-              ("min_interval_ms", 40, 10000))
+              ("min_interval_ms", 40, 10000), ("screen_slack_mad", 0.0, 60.0), ("screen_slack_pct", 0.0, 60.0),
+              ("screen_lookback_s", 1.0, 3600.0))
     for name, lo, hi in checks:
         value = getattr(r, name)
         if not lo <= value <= hi:
@@ -507,6 +559,8 @@ TEMPLATE = '''\
 # pill_position = "top-right"     # top-right | top-left | top-center | bottom-right | bottom-left | bottom-center
 # pill_margin_px = 24
 # pill_hints = true               # the pill's second line: what each key does now (false: one line)
+# learn_start_hotkey = "Ctrl+Alt+["   # learn the screen now showing as the start screen (a take opens when it goes)
+# learn_end_hotkey = "Ctrl+Alt+]"     # learn it as the end screen (it closes the open take at its first frame)
 
 [render]                          # session C1b: the cut, <stem>.cut.mp4 beside the original (never modified)
 # auto = "always"                 # always | takes (only recordings with takes or pauses) | never; `peep render` any time
@@ -518,4 +572,19 @@ TEMPLATE = '''\
 # silence_keep_ms = 250           # silence kept before the first sound and after the last
 # min_interval_ms = 250           # a kept piece shorter than this is dropped, and the render says so
 # av_calibration = "measure"      # measure: record the clap's A/V residual | apply: also correct it | off
+# screen_slack_mad = 6.0          # auto-takes: extra difference allowed between a decoded frame and the live sample
+# screen_slack_pct = 6.0          # ... and extra % of pixels changed
+# screen_lookback_s = 120.0       # how far back a screen learned while showing is followed to its first frame
+
+[auto_takes]                      # session C1d: learned start / end screens become take boundaries (this recording only)
+# enabled = true                  # false: nothing is sampled; the learn keys say so
+# sample_hz = 4.0                 # screen thumbnails a second, only while a screen is learned and not paused
+# thumb_width = 64                # thumbnail width (64x40 on 2560x1600)
+# match_mad = 8.0                 # a sample matches the screen at mean |difference| <= this (0..255) ...
+# match_changed_pct = 8.0         # ... with at most this % of its pixels changed
+# miss_mad = 12.0                 # it clearly is not the screen above this mean |difference| ...
+# miss_changed_pct = 15.0         # ... or above this % changed (in between: neither)
+# changed_level = 24              # a pixel counts as changed past this difference
+# hysteresis = 2                  # samples in a row before a screen counts as appeared / gone
+# learn_wait_ms = 1000            # a learn press waits up to this for the screen to hold still
 '''

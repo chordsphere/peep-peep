@@ -29,7 +29,12 @@ and stderr tail on failure.
             failure), or an accepted pause. Meanwhile requests (`peep mark|take|
             correct|pause`, the agent's chords) go through the event model
             (events.py) and show a corner patch (C1a) or the mark flash; each
-            press's take state and feedback go to active.json for the pill (C1c)
+            press's take state and feedback go to active.json for the pill (C1c).
+            C1d: the agent's learn presses and its sampler's visual events
+            (a learned screen appeared / went away) come the same way; they
+            show no patch (one would draw over the screen being matched), and
+            each learned screen's thumbnail is written as a small PNG under
+            the state folder for the expanded pill (C1e)
     stop    stop flash, settle_ms, then `q`; escalate to terminate on timeout;
             then the audio children (they keep feeding ffmpeg until it exits,
             and ffmpeg's -rw_timeout bounds a hung one: no hang on the stop path)
@@ -67,13 +72,17 @@ from typing import Callable
 
 from . import catalog, ffmpeg_cmd, naming, paths
 from .config import Config, effective_sources, source_set
-from .events import CORRECT, MARK, TAKE, TAKE_RULE, EventModel, Press, press_feedback
+from . import screens
+from .events import CORRECT, FORGET, LEARN, MARK, SCREEN, TAKE, TAKE_RULE, EventModel, Press, press_feedback
+from .events import is_quiet as events_is_quiet
 from .events import summary_line as events_summary_line
 from .flash import NullFlasher, patch_corner
 from .logsetup import event
 from .winapi import ForegroundInfo
 
 log = logging.getLogger("peep.recorder")
+
+AUTO_TAKES_DIR = "auto-takes"          # C1d: <state>/auto-takes/<uid>.<ref>.png, one per learned screen
 
 # When an audio child gets no anchor (ffmpeg printed no `Input #0` before connecting, which
 # the probes never saw), it starts the stream this long before ffmpeg's connect instead:
@@ -393,6 +402,7 @@ class Recorder:
         self.control.claim({"uid": uid, "capture": str(capture), "final": str(final), "sidecar": str(side),
                             "origin": req.origin, "status": "starting", "segment": 1, "captured_s": 0.0,
                             "takes": 0, "take_open": False})
+        self._clear_thumbs()                 # a learned screen belongs to one recording only (C1d)
         sess = _Session(req=req, sc=sc, side=side, stem=stem, coll_dir=coll_dir, uid=uid, collection=collection,
                         use_flash=use_flash, sources=sources, wanted=wanted, ffmpeg=ffmpeg, final=final,
                         model=EventModel(cfg.agent.debounce_ms / 1000))
@@ -442,6 +452,7 @@ class Recorder:
         finally:
             sess.flasher.close()
             self.control.release()
+            self._clear_thumbs()
 
     def _catalog_stems(self, root: Path, collection: str) -> set[str]:
         """The catalog's stems in this collection (the naming audit reserves them
@@ -643,6 +654,9 @@ class Recorder:
         cfg = self.cfg
         rec = sess.model.press(press, time.perf_counter())
         live = sess.live
+        if rec["kind"] in (LEARN, FORGET, SCREEN):
+            self._handle_auto(sess, press, rec)
+            return rec
         if not rec["accepted"]:
             event(log, logging.INFO, "record.event_ignored", kind=rec["kind"], why=rec["ignored"],
                   source=press.source, **(rec.get("debounce") or {}))
@@ -689,6 +703,79 @@ class Recorder:
         self._persist(sess)
         self._publish_press(sess, rec)
         return rec
+
+    def _handle_auto(self, sess: "_Session", press: Press, rec: dict) -> None:
+        """C1d: a learn, a forget or a visual event. No fiducial is ever shown for
+        these (a patch would draw over the very screen being matched; the learn
+        press is recorded instead). A learned screen's thumbnail goes to a PNG
+        under the state folder (C1e's expanded pill shows it) and, as hex, into
+        the sidecar's auto_takes block."""
+        kind, screen = rec["kind"], rec.get("screen")
+        eff = rec.get("screen_effect") or {}
+        if kind == LEARN and rec["accepted"]:
+            ref = sess.model.references.get(screen) or {}
+            sess.thumb_files[ref.get("ref")] = self._write_thumb(sess, ref)
+        if rec["accepted"]:
+            line = {"learned": f"⇥ {screen} screen learned", "relearned": f"⇥ {screen} screen learned again",
+                    "forgotten": f"⇥ {screen} screen forgotten", "close": f"◇ {screen} screen: take {rec['take']} closed",
+                    "open": f"◇ {screen} screen gone: take {rec['take']} opened",
+                    "pending": f"◇ {screen} screen: a take opens when it goes",
+                    "gone": None}.get(rec.get("action"))
+            if kind == LEARN and eff.get("action") in ("close", "pending"):
+                line += {"close": f": take {eff.get('take')} closed at its first frame",
+                         "pending": ": a take opens when it goes"}[eff["action"]]
+            elif kind == LEARN and eff.get("action") == "ignored":
+                line += f" ({eff.get('reason')})"
+            if line:
+                self.status(line)
+        else:
+            self.status(f"· {screen or '?'} screen {kind} ignored ({rec['ignored']})")
+        event(log, logging.INFO, "record.auto_take", kind=kind, screen=screen, change=rec.get("change"),
+              action=rec.get("action"), ignored=rec.get("ignored"), effect=eff.get("action"), take=rec.get("take"),
+              segment=rec.get("segment"), media_s=rec.get("media_s"), ref=rec.get("ref"), score=rec.get("score"))
+        self._persist(sess)
+        if events_is_quiet(rec):
+            self._publish_state(sess)                # nothing anyone needs telling: no new feedback line
+        else:
+            self._publish_press(sess, rec)
+
+    def _thumbs_dir(self) -> Path:
+        return Path(self.control.dir) / AUTO_TAKES_DIR
+
+    def _write_thumb(self, sess: "_Session", ref: dict) -> str | None:
+        """The learned screen's thumbnail as an 8-bit greyscale PNG; its path, or None
+        (logged) when it cannot be written: the sidecar's hex still has it."""
+        try:
+            w, h = ref["size"]
+            data = screens.png_grey(w, h, screens.from_hex(ref["thumb"], w, h))
+            folder = self._thumbs_dir()
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / f"{sess.uid}.{ref['ref']}.png"
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_bytes(data)
+            os.replace(tmp, path)
+            return str(path)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            event(log, logging.WARNING, "record.thumb_write_failed", ref=ref.get("ref"), error=repr(exc))
+            return None
+
+    def _clear_thumbs(self) -> None:
+        """Learned screens are this recording's only: their PNGs go at its start and
+        its end (the sidecar keeps every thumbnail as hex)."""
+        folder = self._thumbs_dir()
+        if not folder.is_dir():
+            return
+        for p in folder.glob("*.png*"):
+            try:
+                p.unlink()
+            except OSError as exc:
+                event(log, logging.WARNING, "record.thumb_clear_failed", path=str(p), error=repr(exc))
+
+    def _publish_state(self, sess: "_Session") -> None:
+        try:
+            self.control.update_active(**self._take_counts(sess))
+        except OSError as exc:
+            event(log, logging.WARNING, "control.update_failed", error=repr(exc))
 
     def _publish_press(self, sess: "_Session", rec: dict) -> None:
         """active.json after a press: the take counts, the take state the pill's
@@ -744,13 +831,30 @@ class Recorder:
         c = sess.model.counts()
         state = sess.model.take_state(time.perf_counter())
         state["at"] = catalog.now_iso()        # the pill grows an open take's time from here, on its own clock
-        return {"takes": c["takes"], "take_open": c["open"], "take_state": state}
+        return {"takes": c["takes"], "take_open": c["open"], "take_state": state,
+                "auto_takes": self._auto_takes_block(sess)}
+
+    def _auto_takes_block(self, sess: "_Session") -> dict:
+        """active.json's `auto_takes` (C1d, for C1e's expanded pill; README documents
+        it): per screen whether it is learned and when, its thumbnail PNG, how often
+        it was seen and when last, and the last thing it did to the takes."""
+        block = sess.model.auto_takes_state()
+        for k in ("start", "end"):
+            ref = sess.model.references.get(k) or {}
+            block[k]["thumb"] = sess.thumb_files.get(ref.get("ref")) if ref else None
+            block[k]["size"] = ref.get("size")
+            block[k]["thresholds"] = ref.get("thresholds")
+        block["at"] = catalog.now_iso()
+        return block
 
     def _sync_events(self, sess: "_Session") -> None:
         sc, m = sess.sc, sess.model
         sc["segments"] = [self._segment_block(block, segsc) for block, segsc in sess.segments]
         sc["events"], sc["takes"], sc["pauses"] = m.events, m.takes, m.pauses
         sc["take_rule"] = TAKE_RULE
+        auto = m.auto_takes_record()
+        if auto is not None:                  # C1d: only once a screen was learned (else C1c's sidecar, unchanged)
+            sc["auto_takes"] = auto
 
     def _persist(self, sess: "_Session") -> None:
         """Rewrite the sidecar now, so a crash later keeps every event so far."""
@@ -1161,3 +1265,4 @@ class _Session:
     reason: str | None = None
     own_side: bool = False         # we created the sidecar (only then may the abort path rewrite it)
     feedback_seq: int = 0          # C1c: one per press published to active.json (the pill shows each once)
+    thumb_files: dict = field(default_factory=dict)   # C1d: reference id -> its PNG under the state folder

@@ -13,6 +13,20 @@ global hotkeys, the REC pill, the stop dialog, marks, and its own lifecycle.
                (all three, like mark, act on any live recording through control files;
                the recorder decides them in events.EventModel, debounce included)
 
+  Ctrl+Alt+[   learn the screen now showing as this recording's start screen (C1d)
+  Ctrl+Alt+]   learn it as the end screen (C1d); `peep learn start|end` and
+               `peep forget start|end` do the same from a terminal
+
+Auto-takes (C1d): a learn press captures the screen (sampler.Sampler, on its
+own thread: it waits up to ~1 s for the screen to hold still) and sends it to
+the recorder as a `learn` request; the recorder's event model decides what
+that appearance does to the takes and publishes the result in active.json's
+`auto_takes`. Once the recorder has confirmed a reference, the sampler matches
+it a few times a second while the recording captures (never while paused, and
+not at all while nothing is learned), and sends each certain appearance or
+disappearance as a `screen` request. A screen learned to look like the other
+kind's is refused here, before anything is sent but the refusal itself.
+
 The REC pill (C1c) is two lines: the state (time, take, kept time), then
 what each key does now, computed by events.next_effect from the take state
 the recorder publishes in active.json, the same function the recorder's
@@ -46,9 +60,9 @@ listener and the clock are injected (tests/test_agent.py). The real Tk
 wiring is `ui.TkUi`; `run_agent` puts the pieces together.
 
 Sections:
-  1. Prefs (last-used collection)   (~line 55)
-  2. Agent                          (~line 110)
-  3. run_agent                      (~line 680)
+  1. Prefs (last-used collection)   (~line 70)
+  2. Agent                          (~line 145)
+  3. run_agent                      (~line 950)
 """
 
 from __future__ import annotations
@@ -64,7 +78,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import __version__, catalog, config as config_mod, dialog, events, hotkeys, lifecycle, naming, paths
+from . import __version__, catalog, config as config_mod, dialog, events, hotkeys, lifecycle, naming, paths, screens
 from . import render as render_mod
 from .catalog import write_json_atomic
 from .control import AgentAlreadyRunning, AgentControl, AlreadyRecording, Control
@@ -135,6 +149,8 @@ STOP_REASONS = {"stop": "hotkey", "discard": "hotkey-discard", "exit": "agent-ex
 EVENT_ACTIONS = {"pause": "pause-toggle", "take": "take", "correct": "correct",
                  "retake": "correct"}        # C1c renamed retake; the old action name still works
 PILL_STATES = ("starting", "recording", "pausing", "paused", "resuming", "stopping")
+LEARN_ACTIONS = {"learn_start": "start", "learn_end": "end"}      # C1d: hotkey action -> screen kind
+LEARN_CONFIRM_S = 5.0          # a learn the recorder has not confirmed by then is given up (logged)
 
 
 @dataclass
@@ -166,7 +182,7 @@ class Agent:
                  config_mtime: Callable[[], float | None] | None = None,
                  install_check: Callable[[], dict] | None = None, code: str | None = None,
                  spawn: Callable = _thread, now: Callable[[], _dt.datetime] | None = None,
-                 render_queue=None):
+                 render_queue=None, sampler=None):
         self.cfg = cfg
         self.ui = ui
         self.control, self.agent_control, self.prefs = control, agent_control, prefs
@@ -193,10 +209,22 @@ class Agent:
         self._feedback_until: _dt.datetime | None = None
         self._mtime = self.config_mtime()
         self.config_loaded_at = catalog.now_iso()
+        # C1d, auto-takes: the live sampler (None: this agent cannot sample, said once at start), the
+        # recording its references belong to, learns sent but not yet confirmed by the recorder, and
+        # references whose PNG could not be read back (not retried every tick).
+        self.sampler = sampler
+        self._auto_uid: str | None = None
+        self._auto_pending: dict = {}
+        self._auto_counter = 0
+        self._auto_unreadable: set = set()
+        self._sampler_published: dict | None = None
+        self._auto_mismatch_said: set = set()
 
     # -- lifecycle ----------------------------------------------------------------
 
     def start(self) -> None:
+        if self.sampler is not None:
+            self._configure_sampler()
         self._start_listener()
         if self.cfg.agent.pill and not self.ui.prepare_overlays():
             self._pill_failed()
@@ -239,6 +267,8 @@ class Agent:
         self.quit_done = True
         if self.listener is not None:
             self.listener.stop()
+        if self.sampler is not None:
+            self.sampler.stop()
         self.agent_control.release()
         event(log, logging.INFO, "agent.exit")
         self.ui.quit()
@@ -278,6 +308,8 @@ class Agent:
             self._on_discard()
         elif action in EVENT_ACTIONS:
             self._on_event(action, qpc, at)
+        elif action in LEARN_ACTIONS:
+            self.learn(LEARN_ACTIONS[action], "hotkey", qpc, at)
         else:
             event(log, logging.WARNING, "agent.unknown_action", action=action)
 
@@ -351,6 +383,175 @@ class Agent:
             self.spawn(self._discard_foreign_when_done, foreign)
             return
         self._toast("nothing is recording, so there is nothing to discard", "info", 2.5)
+
+    # -- auto-takes (C1d) -------------------------------------------------------------
+
+    def _configure_sampler(self) -> None:
+        at = self.cfg.auto_takes
+        self.sampler.configure(config_mod.screen_thresholds(at), at.sample_hz, at.learn_wait_ms / 1000,
+                               width=at.thumb_width)
+
+    def learn(self, kind: str, source: str, qpc: float | None = None, at: str | None = None) -> None:
+        """A learn press (hotkey or `peep learn`): capture the screen now, then send it.
+        Every way this cannot happen is said on screen and logged."""
+        qpc = qpc if qpc is not None else time.perf_counter()
+        at = at or catalog.now_iso()
+        if not self.cfg.auto_takes.enabled:
+            self._toast("auto-takes are off ([auto_takes] enabled = false)", "info", 3)
+            return
+        if self.sampler is None:
+            self._toast("auto-takes cannot read the screen in this agent (see agent.log)", "error", 6)
+            return
+        info = self.control.live_recording()
+        if info is None:
+            self._toast(f"nothing is recording, so there is no {kind} screen to learn (it belongs to one recording)",
+                        "info", 3)
+            return
+        status = info.get("status") or "recording"
+        if status in ("paused", "pausing", "resuming"):
+            self._send_learn(kind, source, qpc, at, {"refused": "paused"})       # recorded, and the pill says why
+            return
+        if status != "recording" or (self.session is not None and self.session.stop_kind is not None):
+            self._toast(f"the recording is {status}; learn the {kind} screen once it is recording", "info", 3)
+            return
+        uid = info.get("uid")
+        event(log, logging.INFO, "agent.learn_capture", screen=kind, source=source)
+        self.sampler.capture(lambda thumb, size, stable, waited, error: self.ui.post(
+            self._learn_captured, kind, source, qpc, at, uid, thumb, size, stable, waited, error))
+
+    def _learn_captured(self, kind, source, qpc, at, uid, thumb, size, stable, waited, error) -> None:
+        if error is not None or thumb is None:
+            event(log, logging.ERROR, "agent.learn_failed", screen=kind, error=error)
+            self._toast(f"could not read the screen to learn it: {error}", "error", 6)
+            return
+        info = self.control.live_recording()
+        if info is None or info.get("uid") != uid:
+            self._toast(f"the recording ended before the {kind} screen was learned", "info", 3)
+            return
+        thr = config_mod.screen_thresholds(self.cfg.auto_takes)
+        other = screens.OTHER[kind]
+        active = self.sampler.active()
+        other_thumb = (self._auto_pending.get(other) or active.get(other) or {}).get("thumb")
+        if other_thumb is not None and screens.same_screen(thumb, other_thumb, thr):
+            self._send_learn(kind, source, qpc, at, {"refused": f"same-as-{other}-screen"})
+            return
+        cur = active.get(kind)
+        same = bool(cur and cur["present"] and screens.same_screen(thumb, cur["thumb"], thr))
+        self._auto_counter += 1
+        ref = f"{kind}-{os.getpid()}-{self._auto_counter}"     # unique across agent restarts (review finding)
+        extra = {"ref": ref, "thumb": screens.to_hex(thumb), "size": list(size), "stable": bool(stable),
+                 "waited_s": waited, "thresholds": thr.to_dict(), "same_as_current": same,
+                 "sampler": {"hz": self.cfg.auto_takes.sample_hz, "thumb_width": self.cfg.auto_takes.thumb_width}}
+        if self._send_learn(kind, source, qpc, at, extra):
+            self._auto_recording(uid)             # a learn right at the start may beat the first tick's sync
+            self._auto_pending[kind] = {"ref": ref, "thumb": thumb, "thr": thr, "size": tuple(size),
+                                        "since": time.monotonic()}
+
+    def _send_learn(self, kind: str, source: str, qpc: float, at: str, extra: dict) -> bool:
+        try:
+            self.control.request_event("learn", source, qpc=qpc, at=at, extra={"screen": kind, **extra})
+        except LookupError:
+            self._toast(f"the recording ended before the {kind} screen was learned", "info", 3)
+            return False
+        except OSError as exc:
+            event(log, logging.ERROR, "agent.learn_send_failed", screen=kind, error=repr(exc))
+            self._toast(f"learning the {kind} screen failed: {exc}", "error", 6)
+            return False
+        event(log, logging.INFO, "agent.learn_sent", screen=kind, source=source, ref=extra.get("ref"),
+              refused=extra.get("refused"), stable=extra.get("stable"), same_as_current=extra.get("same_as_current"))
+        return True
+
+    def forget(self, kind: str, source: str = "cli") -> None:
+        """`peep forget start|end`: the screen stops counting from now on."""
+        try:
+            self.control.request_event("forget", source, extra={"screen": kind})
+        except LookupError:
+            self._toast(f"nothing is recording, so there is no {kind} screen to forget", "info", 3)
+            return
+        except OSError as exc:
+            event(log, logging.ERROR, "agent.forget_failed", screen=kind, error=repr(exc))
+            self._toast(f"forgetting the {kind} screen failed: {exc}", "error", 6)
+            return
+        self._auto_pending.pop(kind, None)
+        if self.sampler is not None:
+            self.sampler.drop(kind)
+        event(log, logging.INFO, "agent.forget_sent", screen=kind, source=source)
+
+    def _emit_screen(self, kind: str, ref: str, change: dict) -> None:
+        """Sampler thread: a learned screen appeared or went away (certain, by its
+        hysteresis), stamped with its first sample. LookupError (the recording just
+        ended) is the sampler's to log."""
+        self.control.request_event("screen", "visual", qpc=change["qpc"],
+                                   extra={"screen": kind, "ref": ref, "change": change["change"],
+                                          "score": change.get("score"), "samples": change.get("samples")})
+
+    def _sync_auto(self, info: dict | None) -> None:
+        """Every tick: the sampler follows what the recorder published. A new
+        recording clears it; a reference the recorder confirmed is matched from
+        now on (present: it was learned while showing); a forgotten one stops; a
+        reference this agent does not hold (it was restarted mid-recording) is
+        read back from its PNG. Sampling runs only while capturing."""
+        if self.sampler is None:
+            return
+        self._auto_recording((info or {}).get("uid"))
+        if info is None:
+            self.sampler.set_running(False)
+            return
+        block = info.get("auto_takes") if isinstance(info.get("auto_takes"), dict) else {}
+        active = self.sampler.active()
+        for kind in screens.KINDS:
+            pub = block.get(kind) if isinstance(block.get(kind), dict) else {}
+            ref = pub.get("ref") if pub.get("learned") else None
+            pend = self._auto_pending.get(kind)
+            if pend is not None:
+                last = pub.get("last_learn") if isinstance(pub.get("last_learn"), dict) else {}
+                if ref == pend["ref"]:
+                    self.sampler.activate(kind, ref, pend["thumb"], present=True, thresholds=pend["thr"],
+                                          size=pend["size"])
+                    self._auto_pending.pop(kind)
+                    continue
+                if last.get("ref") == pend["ref"] and last.get("outcome") == "refused":
+                    event(log, logging.INFO, "agent.learn_refused", screen=kind, ref=pend["ref"],
+                          reason=last.get("reason"))
+                    self._auto_pending.pop(kind)
+                elif time.monotonic() - pend["since"] > LEARN_CONFIRM_S:
+                    event(log, logging.WARNING, "agent.learn_unconfirmed", screen=kind, ref=pend["ref"])
+                    self._auto_pending.pop(kind)
+                else:
+                    continue                          # not decided yet: leave the sampler as it is
+            if ref is None:
+                if kind in active:
+                    self.sampler.drop(kind)
+            elif kind not in active or active[kind]["ref"] != ref:
+                self._adopt_published(kind, ref, pub)
+        self.sampler.set_running(info.get("status") == "recording" and self.cfg.auto_takes.enabled)
+
+    def _auto_recording(self, uid: str | None) -> None:
+        """Learned screens belong to one recording: another one (or none) clears them."""
+        if uid != self._auto_uid:
+            self.sampler.clear()
+            self._auto_pending.clear()
+            self._auto_unreadable.clear()
+            self._auto_mismatch_said.clear()
+            self._auto_uid = uid
+
+    def _adopt_published(self, kind: str, ref: str, pub: dict) -> None:
+        """A reference the recorder holds and this agent does not (restarted mid-recording):
+        read back from the PNG the recorder wrote. Unreadable: said once, not retried."""
+        if ref in self._auto_unreadable:
+            return
+        try:
+            data = Path(str(pub.get("thumb") or "")).read_bytes()
+            w, h, thumb = screens.read_png_grey(data)
+        except (OSError, ValueError) as exc:
+            self._auto_unreadable.add(ref)
+            event(log, logging.ERROR, "agent.reference_unreadable", screen=kind, ref=ref, path=pub.get("thumb"),
+                  error=repr(exc))
+            self._toast(f"the learned {kind} screen could not be read back; learn it again", "warning", 6)
+            return
+        thr = screens.Thresholds.from_dict(pub.get("thresholds"))
+        self.sampler.activate(kind, ref, thumb, present=bool(pub.get("present")), thresholds=thr, size=(w, h))
+        event(log, logging.INFO, "agent.reference_adopted", screen=kind, ref=ref, size=f"{w}x{h}")
 
     # -- recording ------------------------------------------------------------------
 
@@ -608,15 +809,32 @@ class Agent:
                 return
             if command == "reload":
                 self.reload("peep agent reload")
+            if command and command.split()[0] in ("learn", "forget"):        # C1d: `peep learn|forget KIND`
+                verb, kind = command.split()
+                if verb == "learn":
+                    self.learn(kind, "cli")
+                else:
+                    self.forget(kind, "cli")
             if self._ticks % CONFIG_CHECK_EVERY == 0:
                 mtime = self.config_mtime()
                 if mtime != self._mtime:
                     self._mtime = mtime
                     self.reload("config.toml changed")
+                if self.sampler is not None:
+                    stats = self.sampler.stats()
+                    if stats != self._sampler_published:
+                        self._sampler_published = stats
+                        self._publish(sampler=stats)
+                    for kind in stats.get("mismatched") or []:
+                        if kind not in self._auto_mismatch_said:
+                            self._auto_mismatch_said.add(kind)
+                            self._toast(f"the screen's size changed since the {kind} screen was learned; "
+                                        f"learn it again", "warning", 8)
         self._refresh_pill()
 
     def _refresh_pill(self) -> None:
         info = self.control.live_recording()
+        self._sync_auto(info)
         if info is not None:
             status = info.get("status") or "recording"
             if self.session is not None and self.session.stop_kind is not None:
@@ -703,6 +921,8 @@ class Agent:
         retry_changed = new.agent.hotkey_retry_s != self.cfg.agent.hotkey_retry_s
         self.cfg = new
         self.config_loaded_at = catalog.now_iso()
+        if self.sampler is not None:
+            self._configure_sampler()
         if new_table != old_table or retry_changed:
             if self.listener is not None:
                 self.listener.stop()
@@ -810,6 +1030,17 @@ def run_agent(cfg: config_mod.Config) -> int:
         def recorder_factory(run_cfg, status):
             return Recorder(run_cfg, control, flasher_factory=ui.flasher_factory, status=status)
 
+        sampler = None
+        if sys.platform == "win32":
+            from .sampler import GdiGrabber, Sampler
+            if cfg.video.output_idx != 0:
+                event(log, logging.WARNING, "agent.sampler_primary_only", output_idx=cfg.video.output_idx,
+                      why="the sampler reads the primary screen; ddagrab records another output")
+            sampler = Sampler(GdiGrabber, lambda kind, ref, change: holder["agent"]._emit_screen(kind, ref, change),
+                              width=cfg.auto_takes.thumb_width)
+        else:
+            event(log, logging.WARNING, "agent.no_sampler", why="screen sampling needs Windows (GDI)")
+
         def listener_factory(table, on_hotkey, on_problem, on_registered, retry_s):
             return hotkeys.HotkeyListener(table, on_hotkey, on_problem, on_registered, retry_s=retry_s)
 
@@ -822,7 +1053,8 @@ def run_agent(cfg: config_mod.Config) -> int:
         agent = Agent(cfg, ui=ui, control=control, agent_control=agent_control,
                       prefs=Prefs(paths.data_dir() / PREFS_NAME), recorder_factory=recorder_factory,
                       listener_factory=listener_factory, config_mtime=config_mtime,
-                      install_check=lambda: lifecycle.install_status(app), code=code, render_queue=queue)
+                      install_check=lambda: lifecycle.install_status(app), code=code, render_queue=queue,
+                      sampler=sampler)
         holder["agent"] = agent
         agent.start()
         root.mainloop()

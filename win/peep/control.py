@@ -11,20 +11,25 @@ In `paths.state_dir()`:
                    is detected (pid not alive) rather than trusted.
   stop-request     written by `stop`; the recorder polls for it every
                    100 ms, consumes it, and stops cleanly.
-  mark-<ns>-<pid>.json
+  mark-<ns>-<pid>-<seq>.json
                    one file per mark request (`peep mark`, the agent's mark
                    hotkey); the recorder polls them with the stop request,
                    flashes, and appends each to the sidecar's `marks`. One
                    file per request, so two presses inside one poll interval
                    are two marks, not one.
-  event-<ns>-<pid>.json
+  event-<ns>-<pid>-<seq>.json
                    session C1a: one file per take / correct / pause / resume
                    request (`peep take|correct|pause|resume`, the agent's
                    chords), same pattern as marks. Each carries the
                    requester's QPC stamp (`requested_qpc`), so the recorder
                    places the press where it happened, not where it was polled.
+                   Session C1d adds three kinds from the agent: `learn` (a
+                   learn press, with the captured thumbnail), `forget`, and
+                   `screen` (its sampler saw a learned screen appear or go
+                   away), each with its payload (events.EXTRA_KEYS).
   agent.json       the resident agent's pid and status (AgentControl)
-  agent-command    `stop` or `reload`, written by `peep agent stop|reload`
+  agent-command    `stop` or `reload`, written by `peep agent stop|reload`;
+                   C1d: `learn start|end` and `forget start|end` (`peep learn`)
 
 The recorder clears any stop-request and mark files left over from before
 it started, so a stray `peep stop` cannot end the next recording at birth.
@@ -36,6 +41,7 @@ Sections:
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import os
@@ -52,11 +58,23 @@ ACTIVE = "active.json"
 STOP = "stop-request"
 MARK_GLOB = "mark-*.json"
 EVENT_GLOB = "event-*.json"
-EVENT_KINDS = ("take", "correct", "pause", "resume", "pause-toggle")
+EVENT_KINDS = ("take", "correct", "pause", "resume", "pause-toggle", "learn", "forget", "screen")
 EVENT_ALIASES = {"retake": "correct"}       # C1c renamed it; the old name is accepted and written as the new
 AGENT = "agent.json"
 AGENT_COMMAND = "agent-command"
-AGENT_COMMANDS = ("stop", "reload")
+AGENT_COMMANDS = ("stop", "reload", "learn start", "learn end", "forget start", "forget end")
+
+
+_REQUEST_SEQ = itertools.count(1)
+
+
+def request_name(prefix: str) -> str:
+    """A request file's name, unique within this process: the wall clock in ns, the
+    pid, and a per-process sequence. The sequence is C1d's: Windows Python 3.12's
+    clock ticks every ~15.6 ms, and the agent's sampler can send two requests in
+    one tick (a start screen going, an end screen coming); without it the second
+    file would replace the first (the review's finding)."""
+    return f"{prefix}-{time.time_ns():020d}-{os.getpid()}-{next(_REQUEST_SEQ):08d}.json"
 
 
 class AlreadyRecording(RuntimeError):
@@ -139,8 +157,10 @@ class Control:
         files = list(self.dir.glob(MARK_GLOB)) + list(self.dir.glob(EVENT_GLOB))
 
         def order(p: Path):
-            parts = p.name.split("-")
-            return (parts[1] if len(parts) > 2 else "", p.name)
+            # <kind>-<time_ns>-<pid>[-<seq>].json: by time, then by the requester's own sequence (C1d: one
+            # process can write two requests within one tick of a coarse clock), then by name
+            parts = p.name.rsplit(".", 1)[0].split("-")
+            return (parts[1] if len(parts) > 2 else "", parts[3].zfill(12) if len(parts) > 3 else "", p.name)
 
         out = []
         for p in sorted(files, key=order):
@@ -220,16 +240,19 @@ class Control:
             raise LookupError("nothing is recording")
         self.dir.mkdir(parents=True, exist_ok=True)
         req = {"requested_at": now_iso(), "requested_qpc": time.perf_counter(), "source": source, "label": label}
-        name = f"mark-{time.time_ns():020d}-{os.getpid()}.json"
+        name = request_name("mark")
         write_json_atomic(self.dir / name, req)      # temp + replace: the poller never sees half a file
         event(log, logging.INFO, "control.mark_requested", source=source, label=label, pid=info.get("pid"))
         return req
 
-    def request_event(self, kind: str, source: str, *, qpc: float | None = None, at: str | None = None) -> dict:
+    def request_event(self, kind: str, source: str, *, qpc: float | None = None, at: str | None = None,
+                      extra: dict | None = None) -> dict:
         """Ask the live recorder for a take / correct / pause / resume / pause-toggle
-        (session C1a; `retake` is accepted for correct). Raises LookupError if
-        none is live. `qpc`/`at` are the press instant when the caller stamped it
-        earlier (the agent stamps the hotkey the moment it arrives); otherwise now."""
+        (session C1a; `retake` is accepted for correct), or (C1d) a learn / forget
+        / screen event with its payload in `extra`. Raises LookupError if none is
+        live. `qpc`/`at` are the press instant when the caller stamped it earlier
+        (the agent stamps the hotkey the moment it arrives; the sampler, its first
+        matching sample); otherwise now."""
         kind = EVENT_ALIASES.get(kind, kind)
         if kind not in EVENT_KINDS:
             raise ValueError(f"unknown event {kind!r} (known: {', '.join(EVENT_KINDS)})")
@@ -237,9 +260,9 @@ class Control:
         if info is None:
             raise LookupError("nothing is recording")
         self.dir.mkdir(parents=True, exist_ok=True)
-        req = {"kind": kind, "requested_at": at or now_iso(),
+        req = {**(extra or {}), "kind": kind, "requested_at": at or now_iso(),
                "requested_qpc": qpc if qpc is not None else time.perf_counter(), "source": source}
-        name = f"event-{time.time_ns():020d}-{os.getpid()}.json"
+        name = request_name("event")
         write_json_atomic(self.dir / name, req)
         event(log, logging.INFO, "control.event_requested", kind=kind, source=source, pid=info.get("pid"))
         return {**req, "pid": info.get("pid"), "file": name}
@@ -351,6 +374,7 @@ class AgentControl:
             event(log, logging.WARNING, "agent.command_unreadable", error=str(exc))
             return None
         self._clear_command()
+        text = " ".join(text.split())
         if text not in AGENT_COMMANDS:
             event(log, logging.WARNING, "agent.command_unknown", command=text)
             return None
