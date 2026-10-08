@@ -20,6 +20,10 @@ What the cut is, start to finish:
              concealed instead (that corner held from the frame before the
              patch for the patch's ~200 ms; a full-screen mark flash, the
              whole frame), so no fiducial colour survives into the cut
+  strays     (C1c) every other patch that is not the fiducial of a kept edge
+             is concealed the same way when it lands in kept material: the
+             red patch of a take close that a correction moved later, a
+             yellow correction patch, any take patch the cut keeps across
   output     the original's resolution, frame rate, encoder settings
              (ffmpeg_cmd's pipeline -> encoder choice) and audio track layout,
              `-movflags +faststart`
@@ -55,14 +59,14 @@ The pipeline, each stage testable on its own:
 Sections:
   1. Constants + small helpers         (~line 95)
   2. The plan (pure)                   (~line 145)
-  3. Detection (pure)                  (~line 385)
-  4. Audio: levels, seams, onset       (~line 490)
-  5. Resolve                           (~line 615)
-  6. argv + chapters (pure)            (~line 1090)
-  7. Analyzer (ffmpeg)                 (~line 1265)
-  8. Cut status                        (~line 1310)
-  9. Renderer                          (~line 1370)
- 10. RenderQueue + policy              (~line 1705)
+  3. Detection (pure)                  (~line 420)
+  4. Audio: levels, seams, onset       (~line 535)
+  5. Resolve                           (~line 660)
+  6. argv + chapters (pure)            (~line 1195)
+  7. Analyzer (ffmpeg)                 (~line 1375)
+  8. Cut status                        (~line 1425)
+  9. Renderer                          (~line 1480)
+ 10. RenderQueue + policy              (~line 1830)
 """
 
 from __future__ import annotations
@@ -210,6 +214,10 @@ class Plan:
     whole: bool                    # no take at all: keep everything, trimmed to the flashes
     digest: str                    # what the cut is a function of (see source_digest)
     notes: list = field(default_factory=list)       # plan-level facts worth saying (failed segments...)
+    # C1c: take / correct patches that are no kept edge's fiducial (a superseded close, a correction
+    # patch, a dropped take's patches): [{"segment", "media_s", "fiducial", "event", "what"}].
+    # The render conceals any of them that lands in kept material, exactly as it does marks.
+    patches: list = field(default_factory=list)
 
     def seg(self, index: int) -> SegmentInfo:
         for s in self.segments:
@@ -312,12 +320,24 @@ def build_plan(sc: dict, *, stem: str = "") -> Plan:
     ev_by_id = {e.get("id"): e for e in v2.get("events") or []}
     epochs = {int(s.get("index") or 1): (s.get("video_epoch_qpc_est"), s.get("ffmpeg_started_qpc"))
               for s in v2.get("segments") or []}
+    spans = segment_spans(v2)
+
+    def shown_in(ev_id) -> int | None:
+        """The segment the press's patch was shown in (not where the press was placed: a
+        press made while resuming is placed in the pause but its patch shows in the next
+        segment, after its start flash)."""
+        ev = ev_by_id.get(ev_id) or {}
+        return fiducial_segment(ev.get("fiducial"), spans)
 
     def event_fiducial(ev_id, seg_index, press_s):
+        """What the press showed at this edge of this segment: its patch, unless the
+        patch went up in another segment (a press held over a pause shows it in the
+        next one), in which case nothing was shown here and the edge is bare."""
         ev = ev_by_id.get(ev_id)
         fid = (ev or {}).get("fiducial")
         epoch, launch = epochs.get(seg_index, (None, None))
-        if isinstance(fid, dict):
+        shown = fiducial_segment(fid, spans)
+        if isinstance(fid, dict) and shown in (None, seg_index):
             f = _fiducial_from(fid, epoch, launch, default_style="full")
             if f.style != "none":
                 return f
@@ -330,11 +350,15 @@ def build_plan(sc: dict, *, stem: str = "") -> Plan:
         take = take_by_id.get(k.get("take"))
         # A take whose press was made in this segment has its own patch at this edge, even when
         # the press came before the first frame (the model clamps it to 0, but the recorder still
-        # shows the patch, right after the start flash). The flash itself is enforced in resolve().
-        opened_here = take is not None and (take.get("open") or {}).get("segment") == seg.index \
-            and (take.get("open") or {}).get("event") is not None
-        closed_here = take is not None and (take.get("close") or {}).get("segment") == seg.index \
-            and (take.get("close") or {}).get("event") is not None
+        # shows the patch, right after the start flash). So does one pressed while resuming into
+        # this segment (placed at the boundary; its patch shows here, after the start flash: C1c
+        # review). The flash itself is enforced in resolve().
+        o = (take.get("open") or {}) if take else {}
+        cl = (take.get("close") or {}) if take else {}
+        opened_here = take is not None and o.get("event") is not None \
+            and (o.get("segment") == seg.index or shown_in(o.get("event")) == seg.index)
+        closed_here = take is not None and cl.get("event") is not None \
+            and (cl.get("segment") == seg.index or shown_in(cl.get("event")) == seg.index)
         if (a <= 1e-6 and not opened_here) or take is None:
             start = Boundary("start", "segment-start", seg.index, 0.0, seg.start_flash)
             if a > 1e-6:          # an interval not at a segment start without a take: keep its start as-is
@@ -362,7 +386,11 @@ def build_plan(sc: dict, *, stem: str = "") -> Plan:
             continue
         after = m.get("segment") is None
         epoch, launch = epochs.get(seg_i, (None, None))
-        fid = NO_FIDUCIAL if after else _fiducial_from(m.get("flash"), epoch, launch, default_style="full")
+        shown = fiducial_segment(m.get("flash"), spans)
+        # A mark whose patch went up in another segment than its press (held over a pause, or pressed
+        # while resuming) is hidden where it was shown, as a stray patch (stray_patches), not here.
+        fid = NO_FIDUCIAL if after or shown not in (None, seg_i) else \
+            _fiducial_from(m.get("flash"), epoch, launch, default_style="full")
         ms = None if after else m.get("media_s")
         if ms is None and not after:            # a session-B mark (/1): its press, from seconds since launch
             ms = media_time(None, m.get("t"), epoch, launch)[0]
@@ -376,7 +404,75 @@ def build_plan(sc: dict, *, stem: str = "") -> Plan:
     return Plan(uid=str(v2.get("uid") or ""), stem=stem, segments=segments, intervals=intervals, marks=marks,
                 tracks=list(layout), fps=first.fps if first else DEFAULT_FPS, size=first.size if first else None,
                 pipeline=first.pipeline if first else "qsv", audio_bitrate=str(audio_top.get("bitrate") or "160k"),
-                whole=whole, digest=source_digest(v2), notes=notes)
+                whole=whole, digest=source_digest(v2), notes=notes,
+                patches=stray_patches(v2, intervals, {s.index for s in segments}, epochs))
+
+
+STRAY_KINDS = ("take", "correct", "retake")       # event kinds whose patch can sit in kept material (C1c)
+SHOWN_SLACK_S = (0.1, 0.5)                        # a patch's QPC may sit this far before / after its segment
+
+
+def segment_spans(v2: dict) -> dict:
+    """{segment: (epoch_qpc, duration_s)}: where each segment sits on the QPC clock."""
+    return {int(s.get("index") or 1): (s.get("video_epoch_qpc_est"), s.get("duration_s"))
+            for s in v2.get("segments") or []}
+
+
+def fiducial_segment(fid: dict | None, spans: dict) -> int | None:
+    """The segment a press's patch was shown in: as the recorder recorded it
+    (`fiducial.segment`, C1c), else from its QPC stamp against each segment's
+    span (older sidecars). None when nothing was shown."""
+    if not isinstance(fid, dict) or fid.get("shown") is False or not fid.get("color"):
+        return None
+    if isinstance(fid.get("segment"), int):
+        return fid["segment"]
+    q = fid.get("shown_qpc")
+    if not isinstance(q, (int, float)):
+        return None
+    before, after = SHOWN_SLACK_S
+    for idx, (epoch, dur) in sorted(spans.items()):
+        if isinstance(epoch, (int, float)) and epoch - before <= q <= epoch + float(dur or 0.0) + after:
+            return idx
+    return None
+
+
+def stray_patches(v2: dict, intervals: list, segment_ids: set, epochs: dict) -> list:
+    """Every patch that is not the fiducial of a kept edge: the render excludes
+    edge patches with the material beside them, and must conceal any other one
+    the cut keeps. Under C1c's correction chart that is the red patch of a
+    close moved later (now inside its take), and in general any patch a later
+    decision left inside kept material. Each is placed in the segment it was
+    *shown* in: a press made while resuming is recorded in the pause, and one
+    held over a pause is recorded in the segment before, but either shows its
+    patch in the next segment, after the start flash (marks too; a mark shown
+    where it was pressed is plan.marks' to hide).
+    Patches in cut material are listed too; resolve() finds they are in no
+    piece and skips them. Works for a C1a sidecar (`retake` events) unchanged."""
+    # An edge owns a patch only in the segment where it found it: (event, segment) of every edge
+    # with a fiducial. The same press's patch shown in another segment is a stray there.
+    edges = {(bd.event, bd.segment) for iv in intervals for bd in (iv.start, iv.end)
+             if bd.event is not None and bd.fiducial.style != "none"}
+    superseded = {(c or {}).get("event") for t in v2.get("takes") or [] for c in t.get("superseded_closes") or []}
+    spans = segment_spans(v2)
+    out = []
+    for ev in v2.get("events") or []:
+        fid = ev.get("fiducial")
+        kind = ev.get("kind")
+        if not ev.get("accepted") or not isinstance(fid, dict):
+            continue
+        seg_i = fiducial_segment(fid, spans)
+        if seg_i not in segment_ids or (ev.get("id"), seg_i) in edges:
+            continue
+        if kind not in STRAY_KINDS and not (kind == "mark" and ev.get("segment") != seg_i):
+            continue                              # a mark shown where it was pressed: plan.marks hides it
+        epoch, launch = epochs.get(seg_i, (None, None))
+        f = _fiducial_from(fid, epoch, launch, default_style="patch")
+        if f.style == "none":
+            continue
+        role = "superseded close" if ev.get("id") in superseded else (fid.get("kind") or kind)
+        out.append({"segment": seg_i, "media_s": f.stamp_s if f.stamp_s is not None else ev.get("media_s"),
+                    "fiducial": f, "event": ev.get("id"), "what": f"the {role} patch of event {ev.get('id')}"})
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -660,7 +756,7 @@ class Resolved:
     calibration: list
     fallbacks: list                # every boundary or decision that did not go as designed, in words
     dropped: list
-    concealed: list = field(default_factory=list)   # mark patches hidden inside pieces (see _conceal_marks)
+    concealed: list = field(default_factory=list)   # mark and stray patches hidden inside pieces (_conceal_patches)
     phases: dict = field(default_factory=dict)      # segment -> frame-grid phase (s), when not 0
 
     @property
@@ -875,7 +971,7 @@ def resolve(plan: Plan, analyzer: Analyzer, rcfg: RenderConfig, *, say: Callable
                              f"{max(0, k2 - k1)} frame(s) left after excluding the fiducials")
             continue
         pieces.append(Piece(seg.index, iv.take, k1, k2, seg.fps, phase=phase, interval=n))
-    concealed = _conceal_marks(plan, pieces, analyzer, rcfg, cache, fallbacks, seams, dropped)
+    concealed = _conceal_patches(plan, pieces, analyzer, rcfg, cache, fallbacks, seams, dropped)
     out = 0.0
     for p in pieces:
         p.out_start_s = round(out, 6)
@@ -918,39 +1014,62 @@ def conceal_rect(fid: Fiducial, out_size: tuple, margin: int = 2) -> tuple[int, 
     return x1 - x0, y1 - y0, x0, y0
 
 
-def _conceal_marks(plan: Plan, pieces: list, analyzer: Analyzer, rcfg: RenderConfig, cache: dict,
-                   fallbacks: list, seams: list | None = None, dropped: list | None = None) -> list:
-    """A mark's patch is inside kept material (a mark is never a cut). Find its
-    frames like any fiducial and hide them: in the cut, the patch's corner shows
-    what it showed on the frame before the patch, for the patch's ~200 ms (a
-    full-screen mark flash, `mark_style = "full"`, holds the whole frame). A
-    patch that is not found is left as it is, and said so.
+def _concealables(plan: Plan) -> list:
+    """Marks and stray take / correction patches, as one list in press order
+    within each kind: {"mark": n or None, "what", "segment", "media_s",
+    "fiducial", "event", "after"}."""
+    items = []
+    for n, m in enumerate(plan.marks, 1):
+        items.append({"mark": n, "what": f"mark {n}", "segment": m.get("segment"), "media_s": m.get("media_s"),
+                      "fiducial": m.get("fiducial") or NO_FIDUCIAL, "event": m.get("event"),
+                      "after": bool(m.get("after"))})
+    for sp in plan.patches:
+        items.append({"mark": None, "what": sp["what"], "segment": sp["segment"], "media_s": sp.get("media_s"),
+                      "fiducial": sp["fiducial"], "event": sp.get("event"), "after": False})
+    return items
+
+
+def _conceal_patches(plan: Plan, pieces: list, analyzer: Analyzer, rcfg: RenderConfig, cache: dict,
+                     fallbacks: list, seams: list | None = None, dropped: list | None = None) -> list:
+    """Hide every fiducial that sits inside kept material without being a kept
+    edge's own: mark patches (a mark is never a cut) and, since C1c, stray take
+    and correction patches (a close moved later leaves its red patch inside the
+    take). Find its frames like any fiducial and hide them: in the cut, the
+    patch's corner shows what it showed on the frame before the patch, for the
+    patch's ~200 ms (a full-screen mark flash, `mark_style = "full"`, holds the
+    whole frame). A patch that is not found is left as it is, and said so.
 
     Two cases are cut rather than concealed: a patch touching a piece's edge
     (a mark pressed just before a take closes or a flash) has those few
     frames trimmed off that edge, since the material beside it is excluded
-    anyway. And marks pressed within a patch of each other show one long run,
+    anyway. And patches shown back to back in one colour make one long run,
     which is found and hidden once. Runs before trimming, so the pieces'
-    output times are computed from the final pieces."""
+    output times are computed from the final pieces.
+
+    Each entry: {"mark": n | None, "what", "event", "piece", ...}; `mark` is
+    the mark's number for a mark and None for a stray patch."""
     out, seen = [], set()
-    for n, m in enumerate(plan.marks, 1):
-        fid = m.get("fiducial") or NO_FIDUCIAL
-        if m.get("after") or fid.style == "none" or not isinstance(m.get("media_s"), (int, float)):
+    items = _concealables(plan)
+    for item in items:
+        fid = item["fiducial"]
+        n, what = item["mark"], item["what"]
+        if item["after"] or fid.style == "none" or not isinstance(item.get("media_s"), (int, float)):
             continue
         try:
-            seg = plan.seg(m["segment"])
+            seg = plan.seg(item["segment"])
         except KeyError:
             continue
-        at = fid.stamp_s if fid.stamp_s is not None else m["media_s"]
+        at = fid.stamp_s if fid.stamp_s is not None else item["media_s"]
         reach = rcfg.search_s + fid.duration_s + 0.1
         if not any(p.segment == seg.index and p.start_s - reach <= at <= p.end_s + reach for p in pieces):
             continue                                  # nowhere near kept material: not in the cut
-        bd = Boundary("start", "mark", seg.index, m["media_s"], fid, event=m.get("event"))
-        near = sum(1 for o in plan.marks if o is not m and o.get("segment") == seg.index and not o.get("after")
-                   and (o.get("fiducial") or NO_FIDUCIAL).stamp_s is not None
+        kind = "mark" if n is not None else "patch"
+        bd = Boundary("start", kind, seg.index, item["media_s"], fid, event=item.get("event"))
+        near = sum(1 for o in items if o is not item and o["segment"] == seg.index and not o["after"]
+                   and o["fiducial"].stamp_s is not None and o["fiducial"].color == fid.color
                    and abs(o["fiducial"].stamp_s - at) < 2 * (fid.duration_s + 0.1))
         _, _, det = _resolve_boundary(bd, seg, analyzer, rcfg, cache, run_of=1 + near)
-        where = f"mark {n} (segment {seg.index} at {fmt_mmss(m['media_s'])})"
+        where = f"{what} (segment {seg.index} at {fmt_mmss(item['media_s'])})"
         if det is None or not det.found:
             fallbacks.append(f"{where}: its {fid.color} patch was not found "
                              f"({det.reason if det else 'not searched'}); if it is in the cut, it is left there")
@@ -961,18 +1080,19 @@ def _conceal_marks(plan: Plan, pieces: list, analyzer: Analyzer, rcfg: RenderCon
         if not hit:
             continue                                  # the patch fell in excluded material
         if (seg.index, first, last) in seen:
-            continue                                  # one run for marks pressed together: hidden once
+            continue                                  # one run for patches shown together: hidden once
         seen.add((seg.index, first, last))
         j, piece = hit[0]
         if len(hit) > 1:
             fallbacks.append(f"{where}: its patch spans two pieces; it is left in the cut")
             continue
+        base = {"mark": n, "what": what, "event": item.get("event")}
         if first <= piece.k1 or last >= piece.k2 - 1:
             # At the piece's edge: cut those frames off that edge instead (the material on the
             # other side is excluded anyway), as long as the piece stays long enough.
             k1, k2 = (last + 1, piece.k2) if first <= piece.k1 else (piece.k1, first)
             if (k2 - k1) / piece.fps >= rcfg.min_interval_ms / 1000:
-                event(log, logging.INFO, "render.mark_patch_trimmed", mark=n, segment=seg.index,
+                event(log, logging.INFO, "render.patch_trimmed", what=what, segment=seg.index,
                       frames=piece.k2 - piece.k1 - (k2 - k1))
                 side = "start" if k1 != piece.k1 else "end"
                 before = piece.start_s if side == "start" else piece.end_s
@@ -981,19 +1101,19 @@ def _conceal_marks(plan: Plan, pieces: list, analyzer: Analyzer, rcfg: RenderCon
                 if seams is not None:              # the seam record says where the edge really is
                     rec = next((x for x in seams if x["interval"] == piece.interval and x["side"] == side), None)
                     if rec is None:
-                        rec = {"interval": piece.interval, "side": side, "kind": "mark-patch", "segment": seg.index,
-                               "bound_s": _r(before), "how": "none"}
+                        rec = {"interval": piece.interval, "side": side, "kind": f"{kind}-patch",
+                               "segment": seg.index, "bound_s": _r(before), "how": "none"}
                         seams.append(rec)
-                    rec.update(seam_s=_r(after), moved_by="mark patch",
+                    rec.update(seam_s=_r(after), moved_by="mark patch" if n is not None else "stray patch",
                                offset_ms=_r((after - rec["bound_s"]) * 1000, 1))
-                out.append({"mark": n, "piece": j, "trimmed": True, "frames": det.frames,
+                out.append({**base, "piece": j, "trimmed": True, "frames": det.frames,
                             "detected_s": _r(det.first_s), "style": fid.style})
             else:                                     # hardly anything but the patch: drop the piece
                 fallbacks.append(f"{where}: its patch fills most of a {piece.duration_s * 1000:.0f} ms piece; "
                                  f"the piece is dropped")
                 if dropped is not None:
                     dropped.append({"interval": piece.interval, "segment": seg.index, "take": piece.take,
-                                    "kept_ms": _r(piece.duration_s * 1000, 0), "why": f"mark {n}'s patch"})
+                                    "kept_ms": _r(piece.duration_s * 1000, 0), "why": f"{what}'s patch"})
                 piece.k2 = piece.k1
             continue
         rect = None
@@ -1002,7 +1122,7 @@ def _conceal_marks(plan: Plan, pieces: list, analyzer: Analyzer, rcfg: RenderCon
             if rect is None:
                 fallbacks.append(f"{where}: its patch rect is unusable; it is left in the cut")
                 continue
-        out.append({"mark": n, "piece": j, "abs_first": first, "abs_last": last, "rect": list(rect) if rect else None,
+        out.append({**base, "piece": j, "abs_first": first, "abs_last": last, "rect": list(rect) if rect else None,
                     "detected_s": _r(det.first_s), "frames": det.frames, "style": fid.style})
     for c in out:                              # frame numbers within the piece, once every edge trim is done
         if c.get("trimmed"):
@@ -1011,7 +1131,7 @@ def _conceal_marks(plan: Plan, pieces: list, analyzer: Analyzer, rcfg: RenderCon
         first, last = c.pop("abs_first"), c.pop("abs_last")
         if first <= p.k1 or last >= p.k2 - 1:  # a later edge trim reached it: say so rather than guess
             c.update(trimmed=False, first=None, last=None, replace=None, skipped=True)
-            fallbacks.append(f"mark {c['mark']}: its patch ended up at a piece's edge; it is left in the cut")
+            fallbacks.append(f"{c['what']}: its patch ended up at a piece's edge; it is left in the cut")
             continue
         c.update(first=first - p.k1, last=last - p.k1, replace=first - p.k1 - 1)
     # pieces a patch emptied go, and the entries follow their pieces' new positions
@@ -1466,7 +1586,8 @@ def describe(plan: Plan, res: Resolved | None = None, argv: list | None = None) 
         lines.append(f"  chapter {fmt_mmss(ch['start_s'])} {ch['title']}")
     for c in res.concealed:
         how = "trimmed off the piece's edge" if c.get("trimmed") else "concealed"
-        lines.append(f"  mark {c['mark']}: patch {how} ({c['frames']} frames from {c['detected_s']}s)")
+        lines.append(f"  {c.get('what') or ('mark ' + str(c.get('mark')))}: patch {how} "
+                     f"({c['frames']} frames from {c['detected_s']}s)")
     lines.append(f"  output: {len(res.pieces)} piece(s), {fmt_mmss(res.output_duration_s)}"
                  f" ({res.output_duration_s:.2f} s), crossfades {[round(x * 1000) for x in res.xfades]} ms")
     lines += [f"  fallback: {f}" for f in res.fallbacks]

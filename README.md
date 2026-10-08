@@ -7,7 +7,7 @@ and a named file in a predictable place. `start.md` has the original intent.
 ```
 Ctrl+Alt+R               # in any app: magenta flash, REC pill, recording starts
                          # ...do the thing... (Ctrl+Alt+M drops a mark)
-                         # (Ctrl+Alt+T opens/closes a take, Ctrl+Alt+Backspace redoes it,
+                         # (Ctrl+Alt+T opens/closes a take, Ctrl+Alt+Backspace corrects it,
                          #  Ctrl+Alt+P pauses: see "Editing while you record")
 Ctrl+Alt+R               # green flash; a dialog asks for the name
 bale pack demo ⏎         # typed over the suggested name; Enter saves. Done.
@@ -42,7 +42,9 @@ a text editor. See [Audio](#audio). **Session C1a** (landed) is the capture
 side of editing: hard pause as segments of one recording, takes and retakes
 recorded as events, corner-patch fiducials, and a naming audit. **Session
 C1b** (landed) renders from that record: the cut, `<stem>.cut.mp4`, beside the
-original, which is never modified. See [Editing while you record](#editing-while-you-record)
+original, which is never modified. **Session C1c** replaces C1a's retake with
+the ratified correction chart (a two-level undo of the current take) and
+makes the REC pill say what each key does next. See [Editing while you record](#editing-while-you-record)
 and [The cut](#the-cut-session-c1b).
 
 ## Install
@@ -88,7 +90,7 @@ points at `pythonw.exe %LOCALAPPDATA%\peep\app\peepw.py`.
 | `peep mark [--label TEXT]` | Drop a mark in the running recording (a cyan corner patch + an entry in the sidecar's `marks`). Same as **Ctrl+Alt+M**. |
 | `peep pause` / `peep resume` | Hard pause: capture stops and the segment is saved; resume starts the next segment of the same recording. Each waits until it has happened (`--no-wait` doesn't). Same as **Ctrl+Alt+P**. |
 | `peep take` | Open a take, or close the open one. Same as **Ctrl+Alt+T**. |
-| `peep retake` | Discard the most recent take (open or closed) and open a fresh one now. Same as **Ctrl+Alt+Backspace**. |
+| `peep correct` | Correct the current take ([the chart](#the-correction-key-session-c1c)): a closed take's close moves here; otherwise the take is dropped and a fresh one opens here. Prints what it did (`↺ correct: close moved +4.2 s; …`). `peep retake` is the same command, by its old name. Same as **Ctrl+Alt+Backspace**. |
 | `peep agent install\|uninstall` | Add (and start) or remove the hotkey agent's Startup-folder entry. |
 | `peep agent start\|stop\|restart\|status\|reload` | Control the running agent; see below. |
 | `peep render [last\|STEM] [--force] [--dry-run]` | Render the cut, `<stem>.cut.mp4`, from the recording's event record (session C1b; see [The cut](#the-cut-session-c1b)). An up-to-date cut is left alone unless `--force`. `--dry-run` finds every flash and patch, places every seam, and prints the plan and the ffmpeg command without writing anything. A failed render says why, leaves the original untouched, and running it again retries. |
@@ -121,14 +123,15 @@ no tray icon; the REC pill and short on-screen messages are its only UI.
 | **Ctrl+Alt+X** | Stop and delete the take: file and sidecar are removed, and the catalog records it as `discarded`. |
 | **Ctrl+Alt+P** | Hard pause / resume (session C1a). |
 | **Ctrl+Alt+T** | Open a take / close it (session C1a). |
-| **Ctrl+Alt+Backspace** | Retake: discard the most recent take, open a fresh one (session C1a). |
+| **Ctrl+Alt+Backspace** | Correct the current take: move its close here, or drop it and restart it ([the chart](#the-correction-key-session-c1c), session C1c). |
 
 All six are set in `[agent]` in `config.toml`. If another app already
 owns a chord, the agent says so on screen and in `peep agent status`,
 naming the chord. It retries for a minute, because at login the shell may
 still be settling, and then tells you which config key to change.
 
-**The REC pill** (`● 00:12`, top-right by default) is excluded from screen
+**The REC pill** (`● 00:12`, top-right by default; two lines since session
+C1c, [below](#the-pill-session-c1c)) is excluded from screen
 capture with `WDA_EXCLUDEFROMCAPTURE`. You see it, the recording does not.
 The session-B probe checked this on this laptop: ddagrab captured an
 ordinary window but not the excluded ones. If Windows ever refuses the
@@ -188,7 +191,7 @@ cuts are decided at render from the events below.
 | **Session** | Ctrl+Alt+R | `peep rec` / `peep stop` | On and off, as before. |
 | **Hard pause** | Ctrl+Alt+P (toggles) | `peep pause`, `peep resume` | Capture stops: the segment's file is finished (stop flash, `q`, remux). Nothing is recorded while paused. Resume starts a new segment of the same recording (start flash, fresh ffmpeg and audio children, their own anchor). The pill shows **❚❚ PAUSED** in orange, with the time captured so far standing still. |
 | **Take** | Ctrl+Alt+T (toggles) | `peep take` | The first press opens a take (a **blue** corner patch), the next closes it (**red**). Only material inside takes survives the render. With no take at all, the whole recording is kept, so a quick recording behaves as before. A take is also the soft pause: capture continues and the gap is cut at render. |
-| **Retake** | Ctrl+Alt+Backspace | `peep retake` | Discard the most recent take, open or closed, and open a fresh one now (**yellow**). Mid-take: redo from the top of this take. After a close: redo the take just finished. Undo depth is one. |
+| **Correction** | Ctrl+Alt+Backspace | `peep correct` (old name: `peep retake`) | A two-level undo of the current take (**yellow**): the first correction after a close moves the close here; otherwise the take is dropped and a fresh one opens here. [The chart](#the-correction-key-session-c1c) is the spec. |
 | **Mark** | Ctrl+Alt+M | `peep mark` | A chapter or attention point (**cyan**), never a cut. |
 | **Discard** | Ctrl+Alt+X | | The whole recording, every segment. |
 
@@ -198,12 +201,13 @@ cuts are decided at render from the events below.
   starts with the next segment, one closed while paused ends with the last.
 - **Debounce.** A second press of the same chord within `debounce_ms` (1 s)
   is ignored: on the status line (`· take ignored (debounce)`), in the log,
-  and in the sidecar. A deliberate second retake after it is honoured. It is
-  per chord, so closing a take and pressing retake straight away both count.
-  The WSL commands are never debounced.
-- **The pill** shows the take state: `● 02:14  ◉ take 3` while take 3 is open,
-  `● 02:14  ○ 3 takes` between takes.
-- **Corner patches.** Take, retake and mark show a solid 200×200 px square
+  in the sidecar, and on the pill (`T ignored — too fast`). A correction is
+  measured from the previous accepted press of either take key, Take or
+  Correction (the chart's last row), so a correction a moment after closing
+  a take is ignored too. The WSL commands are never debounced.
+- **The pill** shows the take state and what each key does now: see
+  [The pill](#the-pill-session-c1c).
+- **Corner patches.** Take, correction and mark show a solid 200×200 px square
   for 200 ms in the corner opposite the pill (bottom-left by default). It is
   captured on purpose, like the flashes, so C1b can find each event in the
   video; it avoids a full-screen strobe every few sentences. Session and
@@ -211,10 +215,107 @@ cuts are decided at render from the events below.
   fiducial colours are in `[flash]` and must differ clearly from each other;
   `mark_style = "full"` brings back B's full-screen cyan for marks.
 - **Chords** are in `[agent]` (`pause_hotkey`, `take_hotkey`,
-  `retake_hotkey`, `debounce_ms`). Besides letters and F1–F24, the keypad
+  `correct_hotkey`, `debounce_ms`; the old name `retake_hotkey` still works, as
+  does `[flash] retake_color` for `correct_color`). Besides letters and F1–F24, the keypad
   works (`Ctrl+Alt+Num1`, `NumAdd`…, with NumLock on), and **F13–F24 may be
   bound alone**, since no keyboard types them: a macro pad, or mouse software
   that maps a side button to F13, gives you a one-button take.
+
+### The correction key (session C1c)
+
+**The chart is the spec** (ratified 2026-10-07). It replaced C1a's retake
+rule; everything else in C1a's event model stands. In words: **each take
+keeps a two-level undo stack of its original presses — open, then close. A
+correction pops the most recent one and re-issues the same kind of boundary
+at the press.** Popping a close moves the close to the press; popping an open
+drops the take and opens a fresh take at the press.
+
+| You're in… | You press… | Result | Undo stack after |
+|---|---|---|---|
+| No take yet (session just started, or everything since the last take is already cut) | **Take** | Take 1 opens here | `[open]` |
+| | **Correction** | Ignored — nothing to correct (toast says so) | — |
+| **Take open** | **Take** | Take closes here | `[open, close]` |
+| | **Correction** | Take dropped from its open onward; a **fresh take opens here** | `[open]` (fresh) |
+| | **Correction** again | Drops that fresh take too; another opens here ("flubbed again") | `[open]` (fresh) |
+| **Take closed** (last press was its close) | **Take** | Next take opens here; the previous one is final | `[open]` |
+| | **Correction** ① | The close **moves here** — the gap since the early close is back in | `[open]` |
+| | **Correction** ② | Pops the open: the whole take is dropped; a **fresh take opens here** | `[open]` (fresh) |
+| | **Correction** ③ | Drops that fresh take, opens another — same as the open-take row | `[open]` (fresh) |
+| Any state | **Pause** / **Resume** | Doesn't touch the stack. A close moved later across a pause makes the take span the pause. | unchanged |
+| Any state | **Mark** | Never a boundary; a mark inside dropped material is dropped with it | unchanged |
+| Any state | **Correction** within 1 s of the previous accepted press | Debounced, ignored | unchanged |
+
+What follows from it:
+
+- **Only an explicit Take press starts a take.** Zero take presses keeps the
+  whole recording between its flashes, as before; corrections alone never
+  start one.
+- **Once Take has been pressed, the recording is in take mode.** If
+  corrections then drop every take, nothing is kept: the original is saved
+  and no cut is rendered.
+- **"Previous one is final":** once the next take opens, earlier takes are no
+  longer correctable. Undo depth is the current take only.
+- **Closing a fresh take immediately** (①②, then Take) yields an empty or
+  near-empty take, which the render drops (`render.min_interval_ms`); if it
+  was the only one, the render says `nothing left to render` and the original
+  is all there is. That is the way to throw a take away without stopping.
+- **"Toast says so"** is the pill's feedback line (`⌫ nothing to correct`).
+- **The patch for a correction is yellow.** The sidecar records which action
+  it was (`moved-close`, `dropped-take`, or `ignored` and why) and the
+  boundary it left. When a close moves, the original close's red patch now
+  sits inside kept material: the render hides it the way it hides a mark's
+  patch, and any other patch that lands inside kept material too.
+- **Pressed while paused** a correction takes effect at the boundary: a moved
+  close lands at the pause, a fresh take opens at the resume.
+
+### The pill (session C1c)
+
+The pill is two lines: the state, then what each key does now. These are
+the ratified mockups, and the tests reproduce each from a real recording
+state:
+
+```
+No takes yet          ● 00:41  whole video kept
+                      T start take · P pause · M mark
+
+Take open             ● 03:12  ◉ take 2 · 0:48
+                      T close · ⌫ restart take · P pause
+
+Take just closed      ● 03:20  ○ 2 takes · 2:14 kept
+                      T next take · ⌫ move close here
+
+…after one ⌫          ● 03:24  ○ 2 takes · 2:18 kept
+                      T next take · ⌫ drop take 2, restart
+
+Paused                ❚❚ PAUSED 03:24  ○ 2 takes
+                      P resume · nothing is recording
+
+Feedback (1.5 s)      ⌫ close moved +4.2 s
+                      ⌫ take 2 dropped · take 3 started
+                      ⌫ ignored — too fast
+                      ⌫ nothing to correct
+```
+
+- **The hint can't lie.** The second line is computed from the take state
+  the recorder publishes, by the same function (`events.next_effect`) the
+  recorder decides every Take and Correction press with. A key that would do
+  nothing (Correction with no take yet) is not offered.
+- **Key labels come from your chords:** `T` for Ctrl+Alt+T, `⌫` for
+  Backspace, `F13` for a bare F13 binding. Two chords on the same key with
+  different modifiers are shown in full. A hint too long for the pill drops
+  its last keys, then is cut with `…`.
+- **Feedback.** After every press, accepted or ignored, a feedback line
+  replaces the hint for 1.5 s, then the hint returns: `⌫ close moved +4.2 s`,
+  `⌫ take 2 dropped · take 3 started`, `⌫ ignored — too fast`, `⌫ nothing to
+  correct`, `T take 3 started`, `M mark 2`.
+- **Time.** `◉ take 2 · 0:48` is the open take's length so far; `2:14 kept`
+  is what the cut will keep, from the same kept intervals the dialog's
+  status line and the render use, live.
+- **`[agent] pill_hints = false`** gives the one-line pill. The feedback still
+  shows, as a second line for its 1.5 s.
+- The pill is still excluded from capture, and still in the corner opposite
+  the fiducial patch (patch bottom-left when the pill is top-right): it grows
+  away from its corner, never toward the patch. Smoke step 78 checks both.
 
 What lands on disk for a recording with two pauses:
 
@@ -251,7 +352,9 @@ discard deletes it with the rest.
    the magenta.
 3. **Only the takes**, when there are takes (`summary.kept`); with no take
    at all, everything. Each take's corner patches (blue, red, yellow) are
-   excluded with the material outside the take.
+   excluded with the material outside the take. A patch left inside a take
+   (C1c: the red patch of a close that a correction moved later) is hidden
+   like a mark's, below.
 4. **Clean seams.** At every take edge and every join:
    - **Silence trim.** Silence is trimmed off the kept side, keeping
      `silence_keep_ms` (250 ms) of it before the first sound and after the
@@ -423,17 +526,24 @@ describe segment 1, so a one-segment recording reads exactly as before.
   `stop_reason` (`pause` or how the recording ended), and its own `flash`
   (start/stop), `timeline`, `video`, `audio` (its own anchor and clap) and
   `ffmpeg`.
-- `events`: every take, retake, pause, resume and mark press, accepted or
-  not, in order: `kind`, `source` (`hotkey`/`cli`), `qpc` (the press,
+- `events`: every take, correction (C1a: retake), pause, resume and mark
+  press, accepted or not, in order: `kind`, `source` (`hotkey`/`cli`), `qpc` (the press,
   stamped by whoever pressed), `segment` and `media_s` (seconds from that
   segment's first frame), or `after_segment` for a press made while paused,
-  `accepted`, `ignored` (`debounce`, `already-paused`, …), `action`
-  (`open`/`close`/`pause`/`resume`/`mark`), `take`, `discarded_take`, and the
-  `fiducial` it showed (`color`, `style: patch`, `rect` and `screen` in
+  `accepted`, `ignored` (`debounce`, `already-paused`, `nothing-to-correct`,
+  …), `action` (`open`/`close`/`moved-close`/`dropped-take`/`pause`/`resume`/`mark`),
+  `take`, `discarded_take`, for a correction `correction` (the action, the
+  take, the `boundary` it left, a moved close's `from` and `moved_s`, the
+  `undo` stack after), and the `fiducial` it showed (`color`, `style: patch`, `rect` and `screen` in
   physical pixels, `shown_qpc`, `since_ffmpeg_start_s`).
 - `takes`: derived: `id`, `status` (`kept`/`discarded`), `open` and `close`
   (event id, `segment`/`after_segment`, `media_s`; a take still open at the
-  end closes with `reason: session-end`), `discarded_by`.
+  end closes with `reason: session-end`), `discarded_by`, `undo` (C1c: its
+  correction stack; `[]` once final) and `superseded_closes` (the positions a
+  moved close had before).
+- `take_rule` (C1c): `correction/1`. A C1a sidecar has none: its takes were
+  decided by the retake rule, and it renders exactly as recorded, because the
+  render reads only `takes` and `summary.kept`.
 - `pauses`: `after_segment`, the pause and resume events, when capture
   stopped and restarted (QPC), and the `seconds` nothing was recorded.
 - `summary`: `segments`, `takes`, `takes_discarded`, `kept_s`, `total_s`,
@@ -603,7 +713,7 @@ duration_ms = 200          # 150 measured 4-5 frames; raised for margin after th
 [agent]
 record_hotkey = "Ctrl+Alt+R"
 pill_position = "top-right"
-take_hotkey = "Ctrl+Alt+T"     # also pause_hotkey, retake_hotkey; debounce_ms = 1000
+take_hotkey = "Ctrl+Alt+T"     # also pause_hotkey, correct_hotkey; debounce_ms = 1000; pill_hints = true
 ```
 
 If Windows renumbers the mic (the `(6- ...)` part), an empty `audio.device`
@@ -646,6 +756,16 @@ catalog, plus both sidecar versions. `test_c1a_surface.py` covers the chords,
 the pill, the dialog, the WSL commands and the reproduction of the
 2026-10-06 naming report. The Tk windows themselves (the patch, the
 dialog's preview line) need a desktop: smoke steps 51–58.
+
+Session C1c added three test files. `test_correction.py` has every row of the
+correction chart as its own test, the consequences, and the pill's promise:
+the hint's prediction held against what the next press does, for every row
+and for 300 random sequences. `test_c1c_pill.py` reproduces each pill mockup
+from a real recording state, the 1.5 s feedback through the agent,
+`pill_hints`, key labels, the pill's corner against the patch, and the
+renamed config keys. `test_correction_render.py` extends C1b's fuzzer to the
+chart's sequences (no fiducial frame in any cut) and renders sidecars
+written under C1a's rule exactly as recorded.
 
 Session C1b added five test files and `tests/render_fixtures.py`, which
 builds recordings through the real `EventModel` and describes their media as
@@ -833,18 +953,14 @@ marked ★ are the open questions the build could not answer itself.
 50. Run `peep agent restart` (it syncs and loads the new code). `peep agent
     status` should list six hotkeys `registered`: record, mark, discard,
     pause (`Ctrl+Alt+P`), take (`Ctrl+Alt+T`) and retake
-    (`Ctrl+Alt+Backspace`). The C1a probe found P, T and Backspace free on
+    (`Ctrl+Alt+Backspace`; since C1c listed as `correct`). The C1a probe found P, T and Backspace free on
     this laptop (and `Ctrl+Alt+E` taken by another app).
 51. **Takes.** Press Ctrl+Alt+R, talk for 5 s, press **Ctrl+Alt+T**: a blue
     square flashes bottom-left and the pill shows `◉ take 1`. Talk, press
     Ctrl+Alt+T: a red square, `○ 1 take`. Press Ctrl+Alt+R. The dialog's
     status line reads `1 take · 00:0x kept of 00:xx`. In the sidecar,
     `events` has an open and a close, and `summary.kept` one interval.
-52. **Retake.** Record; open a take; say a line badly; press
-    **Ctrl+Alt+Backspace**: a yellow square, the pill still `◉ take 1`
-    (take 1 discarded, take 2 open). Close it with Ctrl+Alt+T, then press
-    retake again (redo the take just finished). The sidecar's `takes` should
-    read discarded, discarded, kept…, and `summary.takes_discarded` 2.
+52. **Retake.** Superseded by C1c's correction chart: steps 71–75.
 53. **Debounce.** Double-tap Ctrl+Alt+T quickly: one patch, the pill opens
     only one take, and the sidecar shows the second press with `ignored:
     debounce`. Wait a second and press again: it closes.
@@ -927,6 +1043,51 @@ marked ★ are the open questions the build could not answer itself.
     (A.1 measured -16..+7 ms). Note a few values; if they sit consistently
     beyond ±33 ms, consider `peep config set render.av_calibration apply`.
 
+### Corrections and the pill (session C1c)
+
+70. Run `peep agent restart` (it syncs and loads the new code). `peep agent
+    status` lists `correct` on `Ctrl+Alt+Backspace` `registered`. If your
+    config.toml sets `retake_hotkey`, it still loads (the old name).
+71. **No take yet.** Press Ctrl+Alt+R. The pill reads `● 00:0x  whole video
+    kept` over `T start take · P pause · M mark`. Press **Ctrl+Alt+Backspace**:
+    no yellow square, and for ~1.5 s the second line reads `⌫ nothing to
+    correct`, then the hint returns.
+72. **① Move the close.** Press T, talk, press T early (red square; `○ 1 take
+    · 0:0x kept`, hint `T next take · ⌫ move close here`). Keep talking ~4 s,
+    press ⌫: a yellow square, `⌫ close moved +4.x s`, the kept time ~4 s
+    longer, hint `T next take · ⌫ drop take 1, restart`.
+73. **② Drop it and restart.** Wait a second, press ⌫ again: yellow,
+    `⌫ take 1 dropped · take 2 started`, the first line `◉ take 2 · 0:0x`,
+    hint `T close · ⌫ restart take · P pause`.
+74. **③ Flubbed again.** Press ⌫ once more: `⌫ take 2 dropped · take 3
+    started`. Talk, press T, stop with Ctrl+Alt+R. The dialog's status line
+    reads `1 take · …`. In the sidecar: `take_rule: "correction/1"`; the
+    events' actions read open, close, moved-close, dropped-take,
+    dropped-take, close; take 1 has `superseded_closes`.
+75. **Debounce.** Close a take with T and press ⌫ within a second: `⌫ ignored
+    — too fast`, no square, and the close stays where it was. Double-tap ⌫
+    quickly: only the first acts. From WSL, `peep correct` twice in a row
+    both act (`↺ correct: …` each time); `peep retake` does the same.
+76. **The render hides the old close.** Record: T, talk, T (early), talk 3 s,
+    ⌫ (①), T (a new take), talk, T, stop. `peep render <stem> --dry-run`
+    lists `the superseded close patch of event 2: patch concealed`. Render,
+    then step through the cut where the first close was (mpv `.`): the corner
+    holds still for ~200 ms, with no red. No blue, red or yellow in any frame.
+77. **Across a pause.** T, talk, T early, Ctrl+Alt+P, wait, Ctrl+Alt+P, talk,
+    ⌫: the close moves into segment 2, the pill's kept time includes both
+    sides. The cut is one take across the pause join, with no red square.
+78. ★ **The enlarged pill.** On screen the two-line pill sits flush in its
+    corner (top-right) while squares flash bottom-left, never overlapping.
+    Step through any recording from steps 71–77: **no pill in any frame**,
+    neither line, nor the feedback line. With `peep config set
+    agent.pill_position bottom-left` (record 10 s with a take, then `peep
+    config unset agent.pill_position`) the squares move top-right.
+79. **Hints off and labels.** `peep config set agent.pill_hints false`: one
+    line; a press still shows its feedback as a second line for 1.5 s.
+    `peep config unset agent.pill_hints`. If a mouse button is mapped to F13,
+    `peep config set agent.take_hotkey F13`: the hint reads `F13 start take`;
+    unset it after.
+
 ## Troubleshooting
 
 - **The cut is missing a word at a seam, or keeps too much silence:**
@@ -959,8 +1120,11 @@ marked ★ are the open questions the build could not answer itself.
   (positive delays the audio) and note it for session C.
 - **A take or pause press seemed to do nothing:** a second press within a
   second of the first is ignored on purpose (debounce, `· take ignored` on
-  the status line, `ignored: debounce` in the sidecar). `[agent]
-  debounce_ms` changes it.
+  the status line, `ignored: debounce` in the sidecar, `ignored — too fast`
+  on the pill). A correction within a second of a take press counts too.
+  `[agent] debounce_ms` changes it.
+- **The pill is too wide:** `peep config set agent.pill_hints false` keeps
+  only its first line (each press's feedback still shows briefly).
 - **A hotkey does nothing:** `peep agent status` says whether the agent is
   running and whether each chord registered. A chord another app holds
   shows `FAILED: Ctrl+Alt+R is already taken`; pick another in `[agent]`.

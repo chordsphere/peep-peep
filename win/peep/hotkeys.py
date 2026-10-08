@@ -3,7 +3,8 @@ and a RegisterHotKey listener on its own Win32 message-loop thread.
 
   parse_chord("Ctrl+Alt+R")       -> Chord(mods=MOD_CONTROL|MOD_ALT, vk=0x52, text="Ctrl+Alt+R")
   table_from_agent_config(cfg)    -> {"record": Chord, "mark": Chord, "discard": Chord,
-                                     "pause": Chord, "take": Chord, "retake": Chord} (C1a),
+                                     "pause": Chord, "take": Chord, "correct": Chord} (C1a;
+                                     C1c renamed retake to correct),
                                      refusing two actions on one chord
   HotkeyListener                  registers the table on a dedicated thread and
                                   calls on_hotkey(action, foreground) for each press
@@ -48,7 +49,7 @@ log = logging.getLogger("peep.hotkeys")
 
 MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, MOD_NOREPEAT = 0x1, 0x2, 0x4, 0x8, 0x4000
 ERROR_HOTKEY_ALREADY_REGISTERED = 1409
-ACTIONS = ("record", "mark", "discard", "pause", "take", "retake")
+ACTIONS = ("record", "mark", "discard", "pause", "take", "correct")
 
 _MODIFIERS = {"ctrl": MOD_CONTROL, "control": MOD_CONTROL, "alt": MOD_ALT, "shift": MOD_SHIFT,
               "win": MOD_WIN, "windows": MOD_WIN, "super": MOD_WIN}
@@ -160,7 +161,7 @@ def build_table(chords: dict[str, str]) -> dict[str, Chord]:
 def table_from_agent_config(agent_cfg) -> dict[str, Chord]:
     return build_table({"record": agent_cfg.record_hotkey, "mark": agent_cfg.mark_hotkey,
                         "discard": agent_cfg.discard_hotkey, "pause": agent_cfg.pause_hotkey,
-                        "take": agent_cfg.take_hotkey, "retake": agent_cfg.retake_hotkey})
+                        "take": agent_cfg.take_hotkey, "correct": agent_cfg.correct_hotkey})
 
 
 def describe_error(chord: Chord, winerror: int) -> str:

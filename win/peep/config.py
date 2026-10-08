@@ -97,11 +97,11 @@ class FlashConfig:
     duration_ms: int = 200               # 150 measured 4-5 frames at 30 fps; 200 for margin (smoke test, 2026-10-04)
     settle_ms: int = 400                 # keep recording this long after the stop flash before sending q
     lead_ms: int = 300                   # wait after ffmpeg reports ready before the start flash
-    # Session C1a: take, retake and mark show a corner patch (captured, for C1b to find)
-    # instead of a full-screen strobe. Session/segment start and stop keep the full flash.
+    # Session C1a: take, correction and mark show a corner patch (captured, for the render to
+    # find) instead of a full-screen strobe. Session/segment start and stop keep the full flash.
     take_open_color: str = "#0000FF"     # blue: a take opens
     take_close_color: str = "#FF0000"    # red: a take closes
-    retake_color: str = "#FFFF00"        # yellow: the last take is discarded and a fresh one opens
+    correct_color: str = "#FFFF00"       # yellow: a correction (C1c; C1a's retake_color is accepted as its old name)
     mark_style: str = "patch"            # patch (corner, mark_color) | full (B's full-screen cyan flash)
     patch_size_px: int = 200             # side of the square patch, physical pixels
     patch_corner: str = "auto"           # auto = the corner opposite the pill | top-left | top-right | bottom-left | bottom-right
@@ -130,13 +130,16 @@ class AgentConfig:
     # Session C1a (the probe found all three free on the laptop, 2026-10-07):
     pause_hotkey: str = "Ctrl+Alt+P"     # hard pause / resume: capture stops; resume opens the next segment
     take_hotkey: str = "Ctrl+Alt+T"      # open a take / close it (only takes survive C1b's render)
-    retake_hotkey: str = "Ctrl+Alt+Backspace"   # discard the most recent take, open a fresh one now
-    debounce_ms: int = 1000              # a second press of the same chord within this is ignored (and logged)
+    correct_hotkey: str = "Ctrl+Alt+Backspace"  # C1c's correction (two-level undo of the current take); the
+                                                # old name retake_hotkey is accepted for it
+    debounce_ms: int = 1000              # a second press within this is ignored (and logged); see events.py
     hotkey_retry_s: int = 60             # keep retrying chords that failed to register (login race)
     dialog: bool = True                  # false: hotkey stops keep the automatic name, no dialog
     pill: bool = True                    # the REC pill (excluded from capture; probe-verified 2026-10-05)
     pill_position: str = "top-right"     # top-right | top-left | top-center | bottom-right | bottom-left | bottom-center
     pill_margin_px: int = 24
+    pill_hints: bool = True              # C1c: the pill's second line, what each key does now; false: one line
+                                         # (each press's 1.5 s feedback still shows)
 
 
 @dataclass(frozen=True)
@@ -208,7 +211,10 @@ MARK_STYLES = ("patch", "full")
 RENDER_AUTO = ("always", "takes", "never")
 AV_CALIBRATION = ("measure", "apply", "off")
 FIDUCIAL_COLOR_KEYS = ("start_color", "stop_color", "mark_color", "take_open_color", "take_close_color",
-                       "retake_color")
+                       "correct_color")
+# Session C1c renamed the retake action to correct. The old key names stay accepted, for every file and
+# every `peep config set` the architect already typed; setting both spellings of one key is an error.
+KEY_ALIASES = {("flash", "retake_color"): "correct_color", ("agent", "retake_hotkey"): "correct_hotkey"}
 MIN_COLOR_DISTANCE = 96       # some channel must differ by this much, so C1b cannot confuse two fiducials
 _TOP_KEYS = {"root": str, "default_collection": str, "log_level": str}
 
@@ -250,6 +256,7 @@ def from_mapping(data: dict, base: Config | None = None, source: str = "mapping"
         table = data[name]
         if not isinstance(table, dict):
             raise ConfigError(f"[{name}] must be a table")
+        table = canonical_table(name, table, source)
         types = _field_types(cls)
         bad = [k for k in table if k not in types]
         if bad:
@@ -259,6 +266,24 @@ def from_mapping(data: dict, base: Config | None = None, source: str = "mapping"
     cfg = replace(cfg, **top, **sections, source=source)
     validate(cfg)
     return cfg
+
+
+def canonical_key(section: str | None, name: str) -> str:
+    """A key's current name: `retake_hotkey` -> `correct_hotkey` in [agent], and so on."""
+    return KEY_ALIASES.get((section, name), name)
+
+
+def canonical_table(section: str, table: dict, source: str = "mapping") -> dict:
+    """A [section] table with old key names under their current ones. Both
+    spellings of one key at once is refused: which should win is a guess."""
+    out = {}
+    for key, value in table.items():
+        name = canonical_key(section, key)
+        if name in out:
+            old = next(k for k in table if k != name and canonical_key(section, k) == name)
+            raise ConfigError(f"[{section}] of {source} sets both {name} and {old} (its old name); keep one")
+        out[name] = value
+    return out
 
 
 def validate(cfg: Config) -> None:
@@ -453,7 +478,7 @@ TEMPLATE = '''\
 # lead_ms = 300
 # take_open_color = "#0000FF"     # corner patch when a take opens (all fiducial colours must differ)
 # take_close_color = "#FF0000"    # ... when a take closes
-# retake_color = "#FFFF00"        # ... on a retake
+# correct_color = "#FFFF00"       # ... on a correction (old name: retake_color)
 # mark_style = "patch"            # patch: marks show a corner patch | full: the full-screen flash
 # patch_size_px = 200             # the patch's side, physical pixels
 # patch_corner = "auto"           # auto (opposite the pill) | top-left | top-right | bottom-left | bottom-right
@@ -473,13 +498,15 @@ TEMPLATE = '''\
 # discard_hotkey = "Ctrl+Alt+X"   # stop and delete the take
 # pause_hotkey = "Ctrl+Alt+P"     # hard pause / resume (capture stops; resume opens the next segment)
 # take_hotkey = "Ctrl+Alt+T"      # open / close a take
-# retake_hotkey = "Ctrl+Alt+Backspace"   # discard the last take, open a fresh one
-# debounce_ms = 1000              # a repeat of the same chord within this is ignored
+# correct_hotkey = "Ctrl+Alt+Backspace"  # correction: move the close here, or drop the take and restart it
+#                                 # (old name: retake_hotkey)
+# debounce_ms = 1000              # a repeat within this is ignored
 # hotkey_retry_s = 60             # keep retrying a chord another app holds, for this long after start
 # dialog = true                   # false: hotkey stops keep the automatic name
 # pill = true                     # the REC pill (hidden from the recording itself)
 # pill_position = "top-right"     # top-right | top-left | top-center | bottom-right | bottom-left | bottom-center
 # pill_margin_px = 24
+# pill_hints = true               # the pill's second line: what each key does now (false: one line)
 
 [render]                          # session C1b: the cut, <stem>.cut.mp4 beside the original (never modified)
 # auto = "always"                 # always | takes (only recordings with takes or pauses) | never; `peep render` any time

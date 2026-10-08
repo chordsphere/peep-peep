@@ -15,6 +15,10 @@ template's commented-out defaults (`# key = value   # why`). The rules:
           (or is removed when the template has none, or when that commented
           line is already in the file), so the built-in default applies.
   get     the effective value: the file's when set, the default otherwise.
+  names   a key's old name (config.KEY_ALIASES: C1c renamed retake_* to
+          correct_*) is the same key: `set agent.retake_hotkey X` sets
+          correct_hotkey, and a line under the old name is rewritten under the
+          new one when it is set or unset.
 
 Every edit is validated before anything is written: the new text must parse
 with tomllib and load through `config.from_mapping`, the same loader the
@@ -67,8 +71,10 @@ def known_keys() -> dict[str, Key]:
 
 def lookup(dotted: str) -> Key:
     keys = known_keys()
-    if dotted in keys:
-        return keys[dotted]
+    section, _, name = dotted.rpartition(".")
+    canonical = f"{section}.{config_mod.canonical_key(section, name)}" if section else dotted
+    if canonical in keys:
+        return keys[canonical]
     near = difflib.get_close_matches(dotted, list(keys), n=3, cutoff=0.6)
     hint = f"; did you mean {', '.join(near)}?" if near else "; `peep config get` lists every key"
     raise ConfigError(f"unknown config key {dotted!r}{hint}")
@@ -211,11 +217,11 @@ def _scan(lines: list[str]) -> list[_Line]:
             continue
         m = _ACTIVE.match(line)
         if m and not line.lstrip().startswith("#"):
-            out.append(_Line(i, section, "active", m.group(2)))
+            out.append(_Line(i, section, "active", config_mod.canonical_key(section, m.group(2))))
             continue
         m = _COMMENTED.match(line)
         if m:
-            out.append(_Line(i, section, "commented", m.group(2)))
+            out.append(_Line(i, section, "commented", config_mod.canonical_key(section, m.group(2))))
             continue
         out.append(_Line(i, section, "other"))
     return out
@@ -389,7 +395,7 @@ def file_keys(path: Path) -> set[str]:
     out = set()
     for k, v in data.items():
         if isinstance(v, dict):
-            out |= {f"{k}.{kk}" for kk in v}
+            out |= {f"{k}.{config_mod.canonical_key(k, kk)}" for kk in v}
         else:
             out.add(k)
     return out

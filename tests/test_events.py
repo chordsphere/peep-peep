@@ -1,6 +1,7 @@
 """Session C1a: the event state machine (events.py), every press sequence the
 brief names, the placement of presses on the segment timeline, and the
-kept / total computation. Pure: no files, no processes, no clock."""
+kept / total computation. Pure: no files, no processes, no clock. (C1c's
+correction chart, row by row, is tests/test_correction.py.)"""
 
 import unittest
 
@@ -91,57 +92,29 @@ class TakeToggleTest(unittest.TestCase):
         self.assertEqual((r["segment"], r["media_s"], r["before_first_frame"]), (1, 0.0, True))
 
 
-class RetakeTest(unittest.TestCase):
-    def test_retake_mid_take_redoes_it_from_this_press(self):
+class RetakeAliasTest(unittest.TestCase):
+    """C1c replaced C1a's retake rule with the correction chart (every row:
+    tests/test_correction.py). `retake` stays an accepted name for it."""
+
+    def test_retake_is_the_correction_key(self):
         s = Session()
         s.press(hk("take", 105))
         r = s.press(hk("retake", 112))
-        self.assertEqual((r["action"], r["take"], r["discarded_take"]), ("open", 2, 1))
+        self.assertEqual((r["kind"], r["requested_as"], r["action"]), ("correct", "retake", "dropped-take"))
+        self.assertEqual((r["take"], r["discarded_take"]), (2, 1))
         s.press(hk("take", 120))
         summary = s.end(30.0)
-        self.assertEqual([(t["id"], t["status"]) for t in s.m.takes], [(1, "discarded"), (2, "kept")])
         self.assertEqual(summary["kept"], [{"segment": 1, "start_s": 12.0, "end_s": 20.0, "take": 2}])
-        self.assertEqual((summary["takes"], summary["takes_discarded"]), (1, 1))
 
-    def test_retake_after_a_close_redoes_the_take_just_finished(self):
+    def test_correction_right_after_closing_a_take_is_debounced(self):
+        """The chart: a correction within 1 s of the previous accepted press is
+        ignored, whatever that press was (C1a's retake was per chord)."""
         s = Session()
         s.press(hk("take", 105))
         s.press(hk("take", 110))
-        r = s.press(hk("retake", 115))
-        self.assertEqual(r["discarded_take"], 1)
-        self.assertIsNotNone(s.m.open_take())                   # the fresh take is open
-        s.press(hk("take", 125))
-        self.assertEqual(s.end(30.0)["kept_s"], 10.0)
-
-    def test_retake_with_no_take_opens_one_and_discards_nothing(self):
-        s = Session()
-        r = s.press(hk("retake", 108))
-        self.assertEqual((r["accepted"], r["take"], r["discarded_take"]), (True, 1, None))
-        summary = s.end(30.0)
-        self.assertFalse(summary["whole"])                     # a take exists now: only it survives
-        self.assertEqual(summary["kept_s"], 22.0)
-
-    def test_undo_depth_is_one(self):
-        """Two deliberate retakes: the second discards the take the first opened,
-        never the one before it."""
-        s = Session()
-        s.press(hk("take", 101))
-        s.press(hk("take", 103))                               # take 1 kept
-        s.press(hk("take", 105))                               # take 2 opens
-        s.press(hk("retake", 107))                             # discards 2, opens 3
-        r = s.press(hk("retake", 109))                         # after the debounce: discards 3, opens 4
-        self.assertEqual((r["discarded_take"], r["take"]), (3, 4))
-        s.end(30.0)
-        self.assertEqual([t["status"] for t in s.m.takes], ["kept", "discarded", "discarded", "kept"])
-
-    def test_retake_right_after_closing_a_take_is_not_debounced(self):
-        """Debounce is per chord: close with take, retake at once (the flub was noticed late)."""
-        s = Session()
-        s.press(hk("take", 105))
-        s.press(hk("take", 110))
-        r = s.press(hk("retake", 110.2))
-        self.assertTrue(r["accepted"])
-        self.assertEqual(r["discarded_take"], 1)
+        r = s.press(hk("correct", 110.2))
+        self.assertEqual((r["accepted"], r["ignored"], r["debounce"]["after"]), (False, "debounce", "take"))
+        self.assertEqual(s.m.takes[0]["close"]["media_s"], 10.0)            # the close did not move
 
 
 class DebounceTest(unittest.TestCase):
@@ -155,12 +128,12 @@ class DebounceTest(unittest.TestCase):
         self.assertIsNotNone(s.m.open_take())                   # still open: the bounce did not close it
         self.assertEqual(len(s.m.events), 2)                   # the ignored press is in the record
 
-    def test_a_deliberate_second_retake_after_the_window_is_honoured(self):
+    def test_a_deliberate_second_correction_after_the_window_is_honoured(self):
         s = Session(debounce=1.0)
         s.press(hk("take", 101))
-        s.press(hk("retake", 105))
-        ignored = s.press(hk("retake", 105.9))
-        honoured = s.press(hk("retake", 106.1))
+        s.press(hk("correct", 105))
+        ignored = s.press(hk("correct", 105.9))
+        honoured = s.press(hk("correct", 106.1))
         self.assertEqual(ignored["ignored"], "debounce")
         self.assertTrue(honoured["accepted"])
         self.assertEqual(honoured["discarded_take"], 2)
@@ -218,11 +191,11 @@ class PauseTest(unittest.TestCase):
                                            {"segment": 2, "start_s": 0.0, "end_s": 20.0, "take": 2}])
         self.assertEqual(opened["action"], "open")
 
-    def test_retake_while_paused_opens_at_the_next_segment(self):
+    def test_a_dropped_take_while_paused_restarts_at_the_next_segment(self):
         s = Session()
         s.press(hk("take", 105))
         s.pause_at(110, end_qpc=110.5, duration=10.5)
-        r = s.press(cli("retake", 150))
+        r = s.press(cli("correct", 150))
         s.resume_at(200, epoch=300.0)
         summary = s.end(5.0)
         self.assertEqual(r["discarded_take"], 1)
@@ -309,7 +282,9 @@ class MarkAndRecordShapeTest(unittest.TestCase):
 
     def test_from_request(self):
         p = Press.from_request({"kind": "retake", "requested_qpc": 12.5, "requested_at": "t", "source": "hotkey"})
-        self.assertEqual(p, Press("retake", 12.5, "t", "hotkey", ""))
+        self.assertEqual(p, Press("correct", 12.5, "t", "hotkey", "", "retake"))      # C1c: the old name
+        p = Press.from_request({"kind": "correct", "requested_qpc": 12.5, "requested_at": "t", "source": "cli"})
+        self.assertEqual((p.kind, p.requested_as), ("correct", ""))
         mark = Press.from_request({"requested_at": "t", "source": "cli", "label": "x"})       # B's mark file
         self.assertEqual((mark.kind, mark.qpc, mark.label), ("mark", None, "x"))
 
@@ -318,8 +293,8 @@ class MarkAndRecordShapeTest(unittest.TestCase):
         self.assertEqual(s.m.counts(), {"takes": 0, "open": False})
         s.press(hk("take", 101))
         self.assertEqual(s.m.counts(), {"takes": 1, "open": True})
-        s.press(hk("retake", 103))
-        self.assertEqual(s.m.counts(), {"takes": 1, "open": True})      # one discarded, one open
+        s.press(hk("correct", 103))
+        self.assertEqual(s.m.counts(), {"takes": 1, "open": True})      # one dropped, a fresh one open
         s.press(hk("take", 105))
         self.assertEqual(s.m.counts(), {"takes": 1, "open": False})
 

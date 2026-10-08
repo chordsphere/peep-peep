@@ -27,8 +27,9 @@ and stderr tail on failure.
     wait    until stop_event (q/Enter in the terminal, or the agent's hotkey), a
             stop-request file (`peep stop`), ffmpeg exiting on its own (a
             failure), or an accepted pause. Meanwhile requests (`peep mark|take|
-            retake|pause`, the agent's chords) go through the event model
-            (events.py) and show a corner patch (C1a) or the mark flash
+            correct|pause`, the agent's chords) go through the event model
+            (events.py) and show a corner patch (C1a) or the mark flash; each
+            press's take state and feedback go to active.json for the pill (C1c)
     stop    stop flash, settle_ms, then `q`; escalate to terminate on timeout;
             then the audio children (they keep feeding ffmpeg until it exits,
             and ffmpeg's -rw_timeout bounds a hung one: no hang on the stop path)
@@ -66,7 +67,7 @@ from typing import Callable
 
 from . import catalog, ffmpeg_cmd, naming, paths
 from .config import Config, effective_sources, source_set
-from .events import MARK, RETAKE, TAKE, EventModel, Press
+from .events import CORRECT, MARK, TAKE, TAKE_RULE, EventModel, Press, press_feedback
 from .events import summary_line as events_summary_line
 from .flash import NullFlasher, patch_corner
 from .logsetup import event
@@ -637,49 +638,70 @@ class Recorder:
 
     def _handle_press(self, sess: "_Session", press: Press) -> dict:
         """Decide one press in the event model, show its fiducial while capturing,
-        tell the user, keep the sidecar and active.json current."""
+        tell the user, keep the sidecar and active.json current (the take state
+        and this press's feedback, for the pill: C1c)."""
         cfg = self.cfg
         rec = sess.model.press(press, time.perf_counter())
         live = sess.live
         if not rec["accepted"]:
-            event(log, logging.INFO, "record.event_ignored", kind=press.kind, why=rec["ignored"],
+            event(log, logging.INFO, "record.event_ignored", kind=rec["kind"], why=rec["ignored"],
                   source=press.source, **(rec.get("debounce") or {}))
-            self.status(f"· {press.kind} ignored ({rec['ignored']})")
+            self.status(f"· {rec['kind']} ignored ({rec['ignored']})")
             self._persist(sess)
+            self._publish_press(sess, rec)
             return rec
-        kind, action = press.kind, rec["action"]
+        kind, action = rec["kind"], rec["action"]
         if action == "pause":
             sess.pause_requested = True
             event(log, logging.INFO, "record.pause_requested", segment=rec.get("segment"), source=press.source)
+            self._publish_press(sess, rec)
             return rec
         if action == "resume":
+            self._publish_press(sess, rec)
             return rec
         color = {"open": cfg.flash.take_open_color, "close": cfg.flash.take_close_color}.get(action)
-        if kind == RETAKE:
-            color = cfg.flash.retake_color
+        if kind == CORRECT:
+            color = cfg.flash.correct_color
         elif kind == MARK:
             color = cfg.flash.mark_color
         if live is not None and sess.use_flash:
             full = kind == MARK and cfg.flash.mark_style == "full"
             fid = self._fiducial(sess, color, full)
-            rec["fiducial"] = {**fid.to_sidecar(live.t0), "kind": f"{kind}-{action}" if kind == TAKE else kind}
+            # `segment`: where the patch was shown. Usually the press's own segment, but a press made
+            # while resuming is placed in the pause and shows its patch in this one (the render needs it).
+            rec["fiducial"] = {**fid.to_sidecar(live.t0), "kind": f"{kind}-{action}" if kind in (TAKE, CORRECT)
+                               else kind, "segment": live.index}
         if kind == MARK:
             self._add_mark(sess, press, rec)
         else:
-            what = {("take", "open"): f"▶ take {rec['take']}", ("take", "close"): f"■ take {rec['take']} closed"}
-            line = what.get((kind, action)) or (f"↺ retake: take {rec['discarded_take']} discarded, take {rec['take']} open"
-                                                if rec["discarded_take"] else f"↺ retake: take {rec['take']} open")
+            corr = rec.get("correction") or {}
+            what = {("take", "open"): f"▶ take {rec['take']}", ("take", "close"): f"■ take {rec['take']} closed",
+                    ("correct", "moved-close"): f"⌫ correct: take {rec['take']}'s close moved here "
+                                                f"({fmt_signed_s(corr.get('moved_s'))})",
+                    ("correct", "dropped-take"): f"⌫ correct: take {rec['discarded_take']} dropped, "
+                                                 f"take {rec['take']} open"}
+            line = what.get((kind, action)) or f"{kind} {action}"
             where = "" if rec.get("segment") else f" (paused: at the boundary after segment {rec.get('after_segment')})"
             self.status(line + where)
             event(log, logging.INFO, "record.event", kind=kind, action=action, take=rec["take"],
-                  discarded=rec["discarded_take"], segment=rec.get("segment"), media_s=rec.get("media_s"),
-                  source=press.source, fiducial=bool(rec["fiducial"]))
+                  discarded=rec["discarded_take"], moved_s=corr.get("moved_s"), segment=rec.get("segment"),
+                  media_s=rec.get("media_s"), source=press.source, fiducial=bool(rec["fiducial"]))
         self._persist(sess)
+        self._publish_press(sess, rec)
+        return rec
+
+    def _publish_press(self, sess: "_Session", rec: dict) -> None:
+        """active.json after a press: the take counts, the take state the pill's
+        hint is computed from, and this press's feedback (a new `seq` each time,
+        so the pill shows it once, for its 1.5 s)."""
+        sess.feedback_seq += 1
+        mark_n = len(sess.sc["marks"]) if rec.get("action") == "mark" else None
+        fb = press_feedback(rec, sess.feedback_seq, mark=mark_n)
+        fb["at"] = catalog.now_iso()            # an agent started later never replays an old press as new
         try:
-            self.control.update_active(**self._take_counts(sess))
+            self.control.update_active(**self._take_counts(sess), feedback=fb)
         except OSError as exc:
             event(log, logging.WARNING, "control.update_failed", error=repr(exc))
-        return rec
 
     def _fiducial(self, sess: "_Session", color: str, full: bool):
         """A corner patch (or, for a full-style mark, B's full-screen flash). A flasher
@@ -717,13 +739,18 @@ class Recorder:
         self.status(f"◆ mark {n} at {at}" + (f" ({press.label})" if press.label else ""))
 
     def _take_counts(self, sess: "_Session") -> dict:
+        """For active.json: C1a's counts (`peep take` prints them) and C1c's take
+        state as of now (the pill's two lines are computed from it)."""
         c = sess.model.counts()
-        return {"takes": c["takes"], "take_open": c["open"]}
+        state = sess.model.take_state(time.perf_counter())
+        state["at"] = catalog.now_iso()        # the pill grows an open take's time from here, on its own clock
+        return {"takes": c["takes"], "take_open": c["open"], "take_state": state}
 
     def _sync_events(self, sess: "_Session") -> None:
         sc, m = sess.sc, sess.model
         sc["segments"] = [self._segment_block(block, segsc) for block, segsc in sess.segments]
         sc["events"], sc["takes"], sc["pauses"] = m.events, m.takes, m.pauses
+        sc["take_rule"] = TAKE_RULE
 
     def _persist(self, sess: "_Session") -> None:
         """Rewrite the sidecar now, so a crash later keeps every event so far."""
@@ -1092,6 +1119,13 @@ def fmt_s(seconds: float | None) -> str:
     return f"{s // 60}:{s % 60:02d}"
 
 
+def fmt_signed_s(seconds: float | None) -> str:
+    """4.2 -> '+4.2 s'; -0.35 -> '-0.3 s' (a moved close, on the status line)."""
+    if not isinstance(seconds, (int, float)):
+        return "? s"
+    return f"{seconds:+.1f} s"
+
+
 @dataclass
 class _Live:
     """The segment being captured right now."""
@@ -1126,3 +1160,4 @@ class _Session:
     captured_s: float = 0.0
     reason: str | None = None
     own_side: bool = False         # we created the sidecar (only then may the abort path rewrite it)
+    feedback_seq: int = 0          # C1c: one per press published to active.json (the pill shows each once)

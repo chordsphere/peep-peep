@@ -103,8 +103,10 @@ def new_sidecar(*, uid: str, slug: str, collection: str, file: str, created: str
         # The top-level video/audio/flash/timeline/ffmpeg blocks above describe segment 1
         # (the file the catalog points at), so a one-segment recording reads exactly as /1.
         "segments": [],             # one block per capture segment, in order (events.segment_block)
-        "events": [],               # every take / retake / pause / resume / mark press, accepted or ignored
+        "events": [],               # every take / correct / pause / resume / mark press, accepted or ignored
         "takes": [],                # derived from events: [{"id", "status": kept|discarded, "open", "close", ...}]
+        "take_rule": None,          # C1c: "correction/1" (events.TAKE_RULE); absent in C1a sidecars, whose
+                                    # takes the retake rule decided. Readers need only `takes` / `summary.kept`.
         "pauses": [],               # [{"after_segment", "pause_event", "resume_event", "paused_qpc", ...}]
         "summary": None,            # {"segments", "takes", "takes_discarded", "kept_s", "total_s", "whole"}
     }

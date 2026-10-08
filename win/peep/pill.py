@@ -17,17 +17,44 @@ Toasts reuse the same window recipe for short messages: a hotkey that
 cannot be registered, "mark 2", "discarded", a failed recording. They
 are excluded from capture too, since they can appear mid-recording.
 
-Pure helpers (tested on WSL): `format_elapsed`, `overlay_position`.
+Session C1c: the pill is two lines (mockups ratified 2026-10-07):
+
+  No takes yet          ● 00:41  whole video kept
+                        T start take · P pause · M mark
+  Take open             ● 03:12  ◉ take 2 · 0:48
+                        T close · ⌫ restart take · P pause
+  Take just closed      ● 03:20  ○ 2 takes · 2:14 kept
+                        T next take · ⌫ move close here
+  …after one ⌫          ● 03:24  ○ 2 takes · 2:18 kept
+                        T next take · ⌫ drop take 2, restart
+  Paused                ❚❚ PAUSED 03:24  ○ 2 takes
+                        P resume · nothing is recording
+
+The first line is the state; the second (the hint) says what each key does
+now. The hint is computed by `events.next_effects` from the take state the
+recorder publishes, the same function the recorder's event model decides
+every take and correct press with, so the pill cannot describe a press
+differently from what it does. Key labels come from the configured chords
+(an F13 binding shows F13). After each press, accepted or ignored, its
+feedback (`⌫ close moved +4.2 s`, `⌫ ignored — too fast`) replaces the hint
+for FEEDBACK_S. `[agent] pill_hints = false` keeps the first line only; the
+feedback still shows, as a second line, for its 1.5 s.
+
+Pure helpers (tested on WSL): `format_elapsed`, `overlay_position`,
+`pill_lines` and what it is built from (`state_line`, `hint_line`,
+`feedback_text`, `key_labels`, `live_take_state`).
 
 Sections:
-  1. Pure helpers               (~line 40)
-  2. Tk overlays                (~line 85)
+  1. Pure helpers               (~line 60)
+  2. The two-line pill (pure)   (~line 125)
+  3. Tk overlays                (~line 290)
 """
 
 from __future__ import annotations
 
 import logging
 
+from . import events
 from .logsetup import event
 
 log = logging.getLogger("peep.pill")
@@ -67,7 +94,7 @@ def pill_text(state: str, elapsed_s: float | None, takes: int = 0, take_open: bo
     if state == "recording":
         return f"● {format_elapsed(elapsed_s)}{tail}"
     if state == "paused":
-        return f"❚❚ PAUSED  {format_elapsed(elapsed_s)}{tail}"
+        return f"❚❚ PAUSED {format_elapsed(elapsed_s)}{tail}"            # the C1c mockup's spacing
     if state == "pausing":
         return "❚❚ pausing…"
     if state == "resuming":
@@ -97,18 +124,198 @@ def overlay_position(position: str, screen_w: int, screen_h: int, w: int, h: int
 
 
 # ---------------------------------------------------------------------------
-# 2. Tk overlays
+# 2. The two-line pill (pure)
+# ---------------------------------------------------------------------------
+
+FEEDBACK_S = 1.5                 # a press's feedback replaces the hint line this long (the ratified 1.5 s)
+FEEDBACK_LATE_S = 1.0            # feedback first seen later than FEEDBACK_S + this after its press is not shown
+HINT_MAX_CHARS = 44              # a longer hint drops its trailing keys, then is cut with "…"
+KEY_SYMBOLS = {"Backspace": "⌫", "Delete": "Del", "Escape": "Esc", "Insert": "Ins", "PageUp": "PgUp",
+               "PageDown": "PgDn"}
+# The CLI's wording of a feedback: no key label (it prints "↺ correct: <feedback>").
+WORD_LABELS = {"take": "", "correct": "", "pause": "", "mark": ""}
+
+
+def key_label(chord_text: str) -> str:
+    """A chord as the hint shows it: its key without the modifiers,
+    'Ctrl+Alt+T' -> 'T', 'Ctrl+Alt+Backspace' -> '⌫', 'F13' -> 'F13'."""
+    key = str(chord_text).split("+")[-1].strip()
+    return KEY_SYMBOLS.get(key, key)
+
+
+def key_labels(agent_cfg) -> dict:
+    """{"take", "correct", "pause", "mark"} -> label, from the configured chords.
+    Two chords whose keys abbreviate alike (Ctrl+Alt+T and Ctrl+Shift+T) are
+    shown in full, so the hint never names one key for two actions."""
+    chords = {"take": agent_cfg.take_hotkey, "correct": agent_cfg.correct_hotkey,
+              "pause": agent_cfg.pause_hotkey, "mark": agent_cfg.mark_hotkey}
+    short = {a: key_label(t) for a, t in chords.items()}
+    clash = {v for v in short.values() if list(short.values()).count(v) > 1}
+    return {a: (chords[a] if short[a] in clash else short[a]) for a in chords}
+
+
+def format_short(seconds: float | None) -> str:
+    """A take's or the kept time, as in the mockups: 48 -> '0:48', 134 -> '2:14',
+    3725 -> '1:02:05' (whole seconds, truncated like format_elapsed)."""
+    s = 0 if not isinstance(seconds, (int, float)) or seconds < 0 else int(seconds)
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+
+def live_take_state(state: dict | None, since_s: float | None, recording: bool) -> dict | None:
+    """The published take state, advanced by `since_s` seconds of capture: an
+    open take's time (and, with no take yet, the kept whole) keeps growing
+    between presses. Paused or not recording: as published."""
+    if not isinstance(state, dict):
+        return None
+    out = dict(state)
+    grow = state.get("growing") or {}
+    extra = max(0.0, since_s) if recording and isinstance(since_s, (int, float)) else 0.0
+    for key, flag in (("kept_s", "kept"), ("take_s", "take")):
+        if extra and grow.get(flag) and isinstance(out.get(key), (int, float)):
+            out[key] = out[key] + extra
+    return out
+
+
+def state_line(status: str, elapsed_s: float | None, state: dict | None, takes: int = 0,
+               take_open: bool = False) -> str:
+    """The pill's first line. Without a take state (an active.json from before
+    C1c, or a recorder that has not published one yet) it is C1a's text."""
+    if not isinstance(state, dict) or status not in ("recording", "paused"):
+        return pill_text(status, elapsed_s, takes, take_open)
+    mode, n = state.get("mode"), int(state.get("takes") or 0)
+    if status == "paused":
+        if mode == events.OPEN:
+            tail = f"  ◉ take {state.get('take')}"
+        else:
+            tail = f"  ○ {n} take{'s' if n != 1 else ''}" if n else ""
+        return f"❚❚ PAUSED {format_elapsed(elapsed_s)}{tail}"
+    head = f"● {format_elapsed(elapsed_s)}"
+    if mode == events.OPEN:
+        return f"{head}  ◉ take {state.get('take')} · {format_short(state.get('take_s'))}"
+    if mode == events.CLOSED:
+        return f"{head}  ○ {n} take{'s' if n != 1 else ''} · {format_short(state.get('kept_s'))} kept"
+    return f"{head}  whole video kept"
+
+
+def hint_words(state: dict) -> dict:
+    """What each key would do now, in words: {"take": "close", "correct":
+    "move close here", ...}; a key that would do nothing is absent. From
+    events.next_effects: the decision the next press will actually get."""
+    eff = events.next_effects(state)
+    mode = state.get("mode")
+    take, corr = eff[events.TAKE], eff[events.CORRECT]
+    out = {"take": "close" if take["action"] == "close" else
+           ("next take" if mode == events.CLOSED else "start take")}
+    if corr["action"] == "moved-close":
+        out["correct"] = "move close here"
+    elif corr["action"] == "dropped-take":
+        out["correct"] = "restart take" if mode == events.OPEN else f"drop take {corr['dropped']}, restart"
+    if mode in (events.NONE, events.OPEN):
+        out["pause"] = "pause"
+    if mode == events.NONE:
+        out["mark"] = "mark"
+    return out
+
+
+def _fit(items: list[str], limit: int = HINT_MAX_CHARS) -> str:
+    """Join with ' · ', dropping trailing items (never the first two) and then
+    cutting with '…' until it fits."""
+    items = list(items)
+    while len(" · ".join(items)) > limit and len(items) > 2:
+        items.pop()
+    text = " · ".join(items)
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+def hint_line(status: str, state: dict | None, labels: dict) -> str | None:
+    """The pill's second line, or None when there is nothing to say (starting,
+    saving, pausing…, or no take state)."""
+    if status == "paused":
+        return f"{labels.get('pause', 'P')} resume · nothing is recording"
+    if status != "recording" or not isinstance(state, dict):
+        return None
+    words = hint_words(state)
+    return _fit([f"{labels.get(k, k)} {words[k]}" for k in ("take", "correct", "pause", "mark") if k in words])
+
+
+def feedback_text(fb: dict | None, labels: dict) -> str | None:
+    """One press's feedback line (events.press_feedback, worded): the mockups'
+    `⌫ close moved +4.2 s`, `⌫ take 2 dropped · take 3 started`, `⌫ ignored —
+    too fast`, `⌫ nothing to correct`, and the same for the other keys."""
+    if not isinstance(fb, dict):
+        return None
+    kind, action, ignored = fb.get("kind"), fb.get("action"), fb.get("ignored")
+    chord = "pause" if kind in ("pause", "resume", "pause-toggle") else kind
+    key = labels.get(chord, chord or "?")
+    if ignored == "debounce":
+        text = "ignored — too fast"
+    elif ignored == "nothing-to-correct":
+        text = "nothing to correct"
+    elif ignored:
+        text = f"ignored ({ignored})"
+    elif action == "moved-close":
+        moved = fb.get("moved_s")
+        text = f"close moved {moved:+.1f} s" if isinstance(moved, (int, float)) else "close moved here"
+    elif action == "dropped-take":
+        text = f"take {fb.get('dropped')} dropped · take {fb.get('take')} started"
+    elif action == "open":
+        text = f"take {fb.get('take')} started"
+    elif action == "close":
+        text = f"take {fb.get('take')} closed"
+    elif action == "mark":
+        text = f"mark {fb['mark']}" if fb.get("mark") else "mark"
+    elif action == "pause":
+        text = "pausing…"
+    elif action == "resume":
+        text = "resuming…"
+    else:
+        return None
+    if not ignored and fb.get("at_boundary") is not None and action in ("open", "close", "moved-close",
+                                                                          "dropped-take"):
+        # a take boundary pressed while paused: it lands at the boundary, said where
+        text += " · at the resume" if action in ("open", "dropped-take") else " · at the pause"
+    return f"{key} {text}".strip()
+
+
+def pill_lines(status: str, elapsed_s: float | None, state: dict | None, labels: dict, *, hints: bool = True,
+               feedback: dict | None = None, takes: int = 0, take_open: bool = False) -> str:
+    """The whole pill text, lines joined by newline: the state line, then the
+    feedback while it is fresh (the caller passes it only then), else the hint
+    when hints are on. One line with hints off and no fresh feedback. A pause
+    or resume press's feedback lasts only while that transition is under way."""
+    lines = [state_line(status, elapsed_s, state, takes, take_open)]
+    if feedback and feedback.get("action") in ("pause", "resume") and \
+            status != {"pause": "pausing", "resume": "resuming"}[feedback["action"]]:
+        feedback = None             # it has taken effect: the first line says so, and the hint is due
+    second = feedback_text(feedback, labels) if feedback else None
+    if second is None and hints:
+        second = hint_line(status, state, labels)
+    if second:
+        lines.append(second)
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 3. Tk overlays
 # ---------------------------------------------------------------------------
 
 
 class Overlay:
-    """One click-through, capture-excluded, topmost label window.
+    """One click-through, capture-excluded, topmost window of one or two lines.
+
+    The first line of the text is the main label (bold for the pill); any
+    further line goes in a second, lighter label under it (C1c: the pill's
+    hint or feedback line). Both left-aligned, on the same background. The
+    window is placed from its requested size each time, so a two-line pill
+    stays flush in its corner (opposite the fiducial patch).
 
     `excluded` is None until the window is first shown; False means the
     affinity did not take, and the overlay will not show itself again."""
 
     def __init__(self, master, font=("Segoe UI", 11, "bold"), alpha: float = 0.92, padx: int = 14, pady: int = 6,
-                 require_exclusion: bool = True):
+                 require_exclusion: bool = True, sub_font=("Segoe UI", 10)):
         import tkinter as tk
         self.require_exclusion = require_exclusion
         self.tk = tk
@@ -117,8 +324,13 @@ class Overlay:
         self.top.overrideredirect(True)
         self.top.attributes("-topmost", True)
         self.top.attributes("-alpha", alpha)
-        self.label = tk.Label(self.top, text="", fg="white", bg=COLORS["info"], font=font, padx=padx, pady=pady)
-        self.label.pack()
+        self.top.configure(bg=COLORS["info"])
+        self.label = tk.Label(self.top, text="", fg="white", bg=COLORS["info"], font=font, padx=padx, pady=pady,
+                              justify="left", anchor="w")
+        self.label.pack(fill="x")
+        self.sub = tk.Label(self.top, text="", fg="white", bg=COLORS["info"], font=sub_font, padx=padx, pady=0,
+                            justify="left", anchor="w")
+        self.sub_shown = False
         self.excluded: bool | None = None
         self.visible = False
 
@@ -153,8 +365,19 @@ class Overlay:
         and this overlay requires it (the pill and the in-recording toast do)."""
         if not self._secure() and self.require_exclusion:
             return False
-        if self.label.cget("text") != text or self.label.cget("bg") != color:
-            self.label.configure(text=text, bg=color)
+        first, _, rest = text.partition("\n")
+        if self.label.cget("text") != first or self.label.cget("bg") != color:
+            self.label.configure(text=first, bg=color)
+            self.top.configure(bg=color)
+        if rest:
+            if self.sub.cget("text") != rest or self.sub.cget("bg") != color:
+                self.sub.configure(text=rest, bg=color)
+            if not self.sub_shown:
+                self.sub.pack(fill="x", pady=(0, 6))
+                self.sub_shown = True
+        elif self.sub_shown:
+            self.sub.pack_forget()
+            self.sub_shown = False
         self.top.update_idletasks()
         w, h = self.top.winfo_reqwidth(), self.top.winfo_reqheight()
         x, y = overlay_position(position, self.top.winfo_screenwidth(), self.top.winfo_screenheight(),

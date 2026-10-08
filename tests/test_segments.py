@@ -1,6 +1,6 @@
 """Session C1a in the recorder, across the real process boundary to
 fake_ffmpeg.py: hard pause / resume as segments of one session, take /
-retake / mark requests and their corner patches, the sidecar's event
+correct / mark requests and their corner patches, the sidecar's event
 record, crash safety while paused, and naming at record time.
 
 Every wait is bounded (bale validates in a sandbox where a hang must fail,
@@ -300,8 +300,8 @@ class PauseResumeTest(SegmentHarness, unittest.TestCase):
         self.assertEqual(res.summary, summary)
 
 
-class TakeRetakeTest(SegmentHarness, unittest.TestCase):
-    def test_take_retake_events_patches_and_sidecar(self):
+class TakeCorrectTest(SegmentHarness, unittest.TestCase):
+    def test_take_correct_events_patches_and_sidecar(self):
         seen = {}
 
         def script(h):
@@ -311,20 +311,26 @@ class TakeRetakeTest(SegmentHarness, unittest.TestCase):
             h.control.request_event("take", "hotkey", qpc=time.perf_counter() + 0.0)   # a bounce: ignored
             h.wait_consumed()
             time.sleep(1.1)
-            h.control.request_event("retake", "hotkey")
+            h.control.request_event("retake", "hotkey")          # C1c: the old name of correct, still accepted
             h.wait_consumed()
+            seen["corrected"] = dict(h.control.read_active())
             h.control.request_mark("cli", "chapter")
             h.wait_consumed()
+            seen["marked"] = dict(h.control.read_active())
 
         res = self.run_session(script)
         self.assertTrue(res.ok, res.message)
         sc = self.sidecar(res)
+        self.assertEqual(sc["take_rule"], "correction/1")
+        self.assertEqual((seen["marked"]["feedback"]["action"], seen["marked"]["feedback"]["mark"]), ("mark", 1))
+        self.assertNotIn("mark", sc["events"][-1])                    # feedback data stays out of the record
         kinds = [(e["kind"], e["accepted"], e["ignored"], e["action"]) for e in sc["events"]]
         self.assertEqual(kinds, [("take", True, None, "open"), ("take", False, "debounce", None),
-                                 ("retake", True, None, "open"), ("mark", True, None, "mark")])
-        take_ev, bounce, retake, mark = sc["events"]
-        self.assertEqual(retake["discarded_take"], 1)
-        for e in (take_ev, retake, mark):
+                                 ("correct", True, None, "dropped-take"), ("mark", True, None, "mark")])
+        take_ev, bounce, corr, mark = sc["events"]
+        self.assertEqual((corr["discarded_take"], corr["take"]), (1, 2))
+        self.assertEqual(corr["correction"]["boundary"]["side"], "open")
+        for e in (take_ev, corr, mark):
             self.assertEqual(e["segment"], 1)
             self.assertIsNotNone(e["qpc"])
             self.assertEqual(e["fiducial"]["style"], "patch")
@@ -332,7 +338,7 @@ class TakeRetakeTest(SegmentHarness, unittest.TestCase):
             self.assertEqual(e["fiducial"]["screen"], {"w": 2560, "h": 1600})
         self.assertEqual(take_ev["fiducial"]["color"], "#0000FF")
         self.assertEqual(take_ev["fiducial"]["kind"], "take-open")
-        self.assertEqual(retake["fiducial"]["color"], "#FFFF00")
+        self.assertEqual((corr["fiducial"]["color"], corr["fiducial"]["kind"]), ("#FFFF00", "correct-dropped-take"))
         self.assertEqual(mark["fiducial"]["color"], "#00FFFF")
         self.assertIsNone(bounce["fiducial"])
         self.assertEqual(self.flasher.calls[1:4], [("patch", "#0000FF", "bottom-left"),
@@ -345,8 +351,100 @@ class TakeRetakeTest(SegmentHarness, unittest.TestCase):
         self.assertEqual(sc["takes"][1]["close"]["reason"], "session-end")
         self.assertEqual(seen["open"]["takes"], 1)
         self.assertTrue(seen["open"]["take_open"])
+        # C1c: active.json carries the take state the pill's hint comes from, and this press's feedback
+        ts, fb = seen["corrected"]["take_state"], seen["corrected"]["feedback"]
+        self.assertEqual((ts["mode"], ts["take"], ts["undo"], ts["takes"]), ("open", 2, ["open"], 1))
+        self.assertEqual((fb["kind"], fb["action"], fb["dropped"], fb["take"]), ("correct", "dropped-take", 1, 2))
         self.assertTrue(any("ignored (debounce)" in s for s in self.status))
+        self.assertTrue(any("⌫ correct: take 1 dropped, take 2 open" in s for s in self.status), self.status)
         self.assertIn("1 take, ", res.message)
+
+    def test_moved_close_then_dropped_take_through_the_recorder(self):
+        """The chart's ① and ② on a real recording (WSL commands: never debounced)."""
+        seen = {}
+
+        def script(h):
+            for name in ("take", "take", "correct", "correct"):
+                h.control.request_event(name, "cli")
+                h.wait_consumed()
+                seen.setdefault("active", []).append(dict(h.control.read_active()))
+                time.sleep(0.05)
+
+        res = self.run_session(script)
+        self.assertTrue(res.ok, res.message)
+        sc = self.sidecar(res)
+        actions = [e["action"] for e in sc["events"]]
+        self.assertEqual(actions, ["open", "close", "moved-close", "dropped-take"])
+        t1, t2 = sc["takes"]
+        self.assertEqual(t1["status"], "discarded")
+        self.assertEqual(t1["superseded_closes"][0]["event"], 2)            # the red patch now inside the take
+        self.assertEqual(t1["close"]["event"], 3)
+        self.assertEqual((t2["open"]["event"], t2["status"]), (4, "kept"))
+        moved = sc["events"][2]
+        self.assertGreater(moved["correction"]["moved_s"], 0)
+        self.assertEqual(moved["fiducial"]["color"], "#FFFF00")
+        self.assertEqual([a["feedback"]["action"] for a in seen["active"]], ["open", "close", "moved-close",
+                                                                            "dropped-take"])
+        self.assertEqual([a["feedback"]["seq"] for a in seen["active"]], [1, 2, 3, 4])
+        self.assertEqual([a["take_state"]["undo"] for a in seen["active"]],
+                         [["open"], ["open", "close"], ["open"], ["open"]])
+
+    def test_a_correction_made_while_resuming_records_where_its_patch_was_shown(self):
+        """Written together with the resume, the correction is placed at the boundary
+        (the pause), but handled once segment 2 is live: its yellow patch shows there,
+        and the fiducial says so, so the render excludes it (C1c review)."""
+        from peep import render
+
+        def script(h):
+            h.control.request_event("take", "cli")
+            h.wait_consumed()
+            h.control.request_event("pause", "cli")
+            h.wait_status("paused")
+            h.control.request_event("resume", "cli")
+            h.control.request_event("correct", "cli")
+            h.wait_status("recording")
+            h.wait_consumed()
+            time.sleep(0.3)
+
+        res = self.run_session(script)
+        sc = self.sidecar(res)
+        [corr] = [e for e in sc["events"] if e["kind"] == "correct"]
+        self.assertEqual((corr["segment"], corr["after_segment"], corr["action"]), (None, 1, "dropped-take"))
+        self.assertEqual((corr["fiducial"]["segment"], corr["fiducial"]["color"]), (2, "#FFFF00"))
+        [iv] = render.build_plan(sc, stem="x").intervals
+        self.assertEqual((iv.segment, iv.start.kind, iv.start.event), (2, "take-open", corr["id"]))
+
+    def test_pause_and_resume_presses_publish_feedback(self):
+        seen = {}
+
+        def script(h):
+            h.control.request_event("pause", "cli")
+            seen["paused"] = h.wait_status("paused")
+            h.control.request_event("resume", "cli")
+            seen["resumed"] = h.wait_status("recording")
+            time.sleep(0.2)
+
+        self.run_session(script)
+        self.assertEqual(seen["paused"]["feedback"]["action"], "pause")
+        self.assertEqual(seen["resumed"]["feedback"]["action"], "resume")
+        self.assertIn("at", seen["resumed"]["feedback"])
+
+    def test_correction_with_no_take_is_ignored_and_said(self):
+        seen = {}
+
+        def script(h):
+            h.control.request_event("correct", "cli")
+            h.wait_consumed()
+            seen["active"] = dict(h.control.read_active())
+
+        res = self.run_session(script)
+        sc = self.sidecar(res)
+        [ev] = sc["events"]
+        self.assertEqual((ev["accepted"], ev["ignored"], ev["fiducial"]), (False, "nothing-to-correct", None))
+        self.assertEqual(ev["correction"], {"action": "ignored", "reason": "nothing-to-correct"})
+        self.assertEqual(seen["active"]["feedback"]["ignored"], "nothing-to-correct")
+        self.assertTrue(sc["summary"]["whole"])                              # a correction never starts a take
+        self.assertEqual([c for c in self.flasher.calls if c[0] == "patch"], [])      # no patch for an ignored press
 
     def test_mark_style_full_keeps_the_full_screen_flash(self):
         cfg = self.cfg(flash={"mark_style": "full"})
