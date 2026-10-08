@@ -7,6 +7,13 @@ for the analysis decodes: the flashes and patches where a real capture puts
 them (the render probe: first frame ~40 ms after the shown stamp), the
 clap's tone ~40 ms after its request, and any "speech" the test asks for.
 
+Session C1d adds learned screens: `build_sidecar(..., screens=...)` puts
+screens on the timeline (spans of a synthetic pattern) and runs the agent's
+side for real: a sampler at 4 Hz over them (screens.Presence, the live
+hysteresis), learn presses with a captured reference, and every appearance and
+disappearance fed to the real event model when the sampler would have
+delivered it. `scene_for` draws the same screens into the decoded thumbnails.
+
 Not a test module itself (no test_ prefix); the render tests import it."""
 
 from __future__ import annotations
@@ -14,7 +21,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from peep import catalog
+from peep import catalog, screens as scr
 from peep.events import CORRECT, MARK, TAKE, TAKE_RULE, EventModel, Press
 
 FPS = 30
@@ -65,11 +72,146 @@ class C1aRetakeModel(EventModel):
             rec.update(accepted=True, action="close", take=open_["id"])
 
 
+# -- C1d: synthetic screens ---------------------------------------------------------------------
+# A screen is a pseudo-random pattern of grey pixels (seed = its pattern id); every other frame is
+# "content", a different pattern per frame, so it never matches. fake_ffmpeg.py draws the same
+# (screen_pixel there is a copy of pattern_pixel here; test_auto_render checks they agree).
+THUMB = (20, 12)              # the fixtures' thumbnails: small, so the fuzzers stay fast (64x40 works the same);
+                              # not 16x10, which is the flash grid fake_ffmpeg tells them apart by
+SCREEN_NOISE = 3              # a decoded screen frame differs from the pattern by up to this (the encoder)
+GDI_OFFSET = 2                # the live (GDI) reference differs from the pattern by this (the probe: mad 3.5)
+CONTENT_SEED = 100000
+
+
+def pattern_pixel(seed: int, i: int) -> int:
+    x = (seed * 2654435761 + i * 40503 + 12345) & 0xFFFFFFFF
+    x ^= x >> 13
+    x = (x * 1103515245 + 12345) & 0xFFFFFFFF
+    return (x >> 16) & 0xFF
+
+
+def pattern(seed: int, size: tuple = THUMB, noise: int = 0, frame: int = 0, offset: int = 0) -> bytes:
+    n = size[0] * size[1]
+    out = bytearray(n)
+    for i in range(n):
+        v = pattern_pixel(seed, i) + offset
+        if noise:
+            v += pattern_pixel(frame + 7919, i) % (2 * noise + 1) - noise
+        out[i] = min(255, max(0, v))
+    return bytes(out)
+
+
+def screen_at(spans: list, t: float):
+    """The pattern id on screen at media time t of one segment, or None."""
+    for t0, t1, pid in spans:
+        if t0 <= t < t1:
+            return pid
+    return None
+
+
+def live_thumb(spans: list, t: float, fps: int = FPS, size: tuple = THUMB) -> bytes:
+    """What the agent's GDI sample sees at media time t: the screen, or the content of that frame."""
+    pid = screen_at(spans, t)
+    if pid is not None:
+        return pattern(pid, size, offset=GDI_OFFSET)
+    return pattern(CONTENT_SEED + int(t * fps + 1e-6), size)
+
+
+class ScreenSim:
+    """The agent's side of auto-takes, for the fixtures: learn presses (capture what
+    is on screen, refuse a screen that matches the other one, say when it is the
+    same appearance again) and a sampler ticking at `hz` with the real
+    screens.Presence, feeding the real model exactly what the agent would send."""
+
+    def __init__(self, model, spec: dict):
+        self.model, self.spec = model, spec
+        self.hz, self.phase = float(spec.get("hz", 4.0)), float(spec.get("phase", 0.0))
+        self.thr = scr.Thresholds()
+        self.active: dict = {}
+        self.counter = 0
+        self.log: list = []
+
+    def actions(self, k: int, e: float, end_at: float) -> list:
+        spans = self.spec.get("spans", {}).get(k, [])
+        acts = []
+        for n, (kind, seg, ms) in enumerate(self.spec.get("learn", [])):
+            if seg == k:
+                acts.append((e + ms + 0.15, 1, n, (lambda kind=kind, ms=ms: self.learn(kind, e, ms, spans, k))))
+        for n, (kind, seg, ms) in enumerate(self.spec.get("forget", [])):
+            if seg == k:
+                acts.append((e + ms + 0.05, 1, 1000 + n, (lambda kind=kind, ms=ms: self.forget(kind, e + ms, k, ms))))
+        t, n = e + self.phase, 0
+        while t < end_at:
+            acts.append((t, 2, n, (lambda t=t: self.tick(t, e, spans))))
+            n += 1
+            t = e + self.phase + n / self.hz
+        return acts
+
+    def learn(self, kind: str, e: float, ms: float, spans: list, segment: int = 1) -> dict:
+        thumb = live_thumb(spans, ms)
+        other = scr.OTHER[kind]
+        cur = self.active.get(kind)
+        if other in self.active and scr.same_screen(thumb, self.active[other]["thumb"], self.thr):
+            extra = {"screen": kind, "refused": f"same-as-{other}-screen"}
+        else:
+            self.counter += 1
+            same = bool(cur and cur["presence"].present and scr.same_screen(thumb, cur["thumb"], self.thr))
+            extra = {"screen": kind, "ref": f"{kind}-{self.counter}", "thumb": thumb.hex(), "size": list(THUMB),
+                     "stable": True, "waited_s": 0.1, "thresholds": self.thr.to_dict(), "same_as_current": same,
+                     "sampler": {"hz": self.hz, "thumb_width": THUMB[0]}}
+        rec = self.model.press(Press("learn", e + ms, source="hotkey", extra=extra), e + ms + 0.15)
+        if rec["accepted"]:
+            self.active[kind] = {"ref": extra["ref"], "thumb": thumb,
+                                 "presence": scr.Presence(thumb, self.thr, present=True)}
+        self.log.append({"event": rec["id"], "kind": "learn", "screen": kind, "qpc": e + ms, "media_s": ms,
+                         "segment": segment, "pattern": screen_at(spans, ms), "accepted": rec["accepted"]})
+        return rec
+
+    def forget(self, kind: str, qpc: float, segment: int = 1, ms: float = 0.0) -> dict:
+        rec = self.model.press(Press("forget", qpc, source="cli", extra={"screen": kind}), qpc + 0.05)
+        self.active.pop(kind, None)
+        self.log.append({"event": rec["id"], "kind": "forget", "screen": kind, "qpc": qpc, "media_s": ms,
+                         "segment": segment, "accepted": rec["accepted"]})
+        return rec
+
+    @staticmethod
+    def learned_pattern(log: list, kind: str, segment: int, t: float):
+        """The pattern `kind` was learned as at (segment, t), per the log; None when
+        it was not learned then (never, refused, or forgotten since)."""
+        cur = None
+        for x in log:
+            if x["kind"] not in ("learn", "forget") or x["screen"] != kind or not x["accepted"]:
+                continue
+            if (x["segment"], x["media_s"]) > (segment, t):
+                break
+            cur = x.get("pattern") if x["kind"] == "learn" else None
+        return cur
+
+    def tick(self, t: float, e: float, spans: list) -> None:
+        if not self.active:
+            return
+        thumb = live_thumb(spans, t - e)
+        changes = []
+        for kind, a in list(self.active.items()):
+            ch = a["presence"].feed(t, thumb)
+            if ch is not None:
+                changes.append((kind, a, ch))
+        for kind, a, ch in sorted(changes, key=lambda c: scr.change_order(c[0], c[2]["change"])):   # as the sampler
+            rec = self.model.press(Press("screen", ch["qpc"], source="visual",
+                                         extra={"screen": kind, "ref": a["ref"], "change": ch["change"],
+                                                "score": ch["score"], "samples": ch["samples"]}), t)
+            ms = ch["qpc"] - e
+            pid = screen_at(spans, ms) if ch["change"] == "appear" else \
+                screen_at(spans, ms - 1.0 / self.hz)
+            self.log.append({"event": rec["id"], "kind": "screen", "screen": kind, "change": ch["change"],
+                             "qpc": ch["qpc"], "media_s": ms, "pattern": pid, "accepted": rec["accepted"]})
+
+
 def build_sidecar(stem: str, durations: list, presses: list = (), *, collection: str = "inbox",
                   tracks: tuple = ("system",), flash: bool = True, base: float = 1000.0, gap: float = 20.0,
                   output_size: str = "2560x1600", pipeline: str = "qsv", clap: bool = True,
                   status: str = "ok", serial_fiducials: bool = True, rule: str = "correction",
-                  source: str = "cli") -> dict:
+                  source: str = "cli", screens: dict | None = None) -> dict:
     """A peep.sidecar/2 for a recording of len(durations) segments.
 
     presses: (kind, segment, media_s[, label]) for a press while segment k
@@ -87,6 +229,13 @@ def build_sidecar(stem: str, durations: list, presses: list = (), *, collection:
     model. rule "c1a": the sidecar C1a's retake rule wrote for the same
     presses (C1aRetakeModel). source "hotkey" applies the debounce.
 
+    screens:  (C1d) {"spans": {segment: [(t0, t1, pattern id)]}, "learn": [(kind, segment, media_s)],
+    "forget": [(kind, segment, media_s)], "hz": 4.0, "phase": 0.0 (the sampler's first tick after a
+    segment's first frame)}. A learn captures what is on screen then (the pattern under it, or the
+    content of that frame). The sampler runs while a segment captures and a screen is learned; each
+    certain change reaches the model at the sample that made it certain. Learns, forgets and visual
+    events never show a patch.
+
     serial_fiducials: as the recorder shows them, one after another. A patch
     is shown on the recorder's thread and holds it for 200 ms, and nothing is
     handled during the start flash, so a patch goes up 50 ms after its press
@@ -94,6 +243,7 @@ def build_sidecar(stem: str, durations: list, presses: list = (), *, collection:
     draws every patch 50 ms after its press, overlapping (a stamp a render
     must not trust blindly)."""
     model = C1aRetakeModel(1.0) if rule == "c1a" else EventModel(1.0)
+    sim = ScreenSim(model, screens) if screens else None
     epochs, t = {}, base
     for k, d in enumerate(durations, 1):
         epochs[k] = t
@@ -140,11 +290,24 @@ def build_sidecar(stem: str, durations: list, presses: list = (), *, collection:
                 press(p[0], prev_end - 0.3 + n * 0.05, p[3] if len(p) > 3 else "", shown_in=k)
             for n, p in enumerate(p for p in presses if p[1] == "resuming" and p[2] == k - 1):
                 press(p[0], e - 0.4 + n * 0.08, p[3] if len(p) > 3 else "", shown_in=k)
-        for p in sorted((p for p in presses if p[1] == k), key=lambda p: p[2]):
-            press(p[0], e + p[2], p[3] if len(p) > 3 else "")
         last = k == len(durations)
-        if not last:
-            press("pause", e + d - 0.5)
+        if sim is None:
+            for p in sorted((p for p in presses if p[1] == k), key=lambda p: p[2]):
+                press(p[0], e + p[2], p[3] if len(p) > 3 else "")
+            if not last:
+                press("pause", e + d - 0.5)
+        else:
+            # C1d: presses, learns, forgets and the sampler's ticks, in the order they reach the model.
+            # The sampler stops when the recorder publishes "pausing" (the pause press) or "stopping"
+            # (the stop request, just before the stop flash).
+            acts = [(e + p[2] + 0.05, 0, n, (lambda p=p: press(p[0], e + p[2], p[3] if len(p) > 3 else "")))
+                    for n, p in enumerate(sorted((p for p in presses if p[1] == k), key=lambda p: p[2]))]
+            end_at = e + d - 0.5 if not last else e + d - STOP_FLASH_BEFORE - 0.1
+            acts += sim.actions(k, e, end_at)
+            if not last:
+                acts.append((e + d - 0.5 + 0.05, 0, 10 ** 6, lambda: press("pause", e + d - 0.5)))
+            for _, _, _, act in sorted(acts, key=lambda a: a[:3]):
+                act()
         model.segment_ended(k, e + d, d)
         if not last:
             model.set_paused(True)
@@ -181,6 +344,11 @@ def build_sidecar(stem: str, durations: list, presses: list = (), *, collection:
     summary = model.finish()
     sc.update(status="ok", duration_s=round(sum(durations), 3), segments=segments, events=model.events,
               takes=model.takes, pauses=model.pauses, summary=summary, marks=marks)
+    if sim is not None:
+        auto = model.auto_takes_record()
+        if auto is not None:
+            sc["auto_takes"] = auto
+        sc["_sim"] = sim.log                 # the fixture's own account (tests read it; the render ignores it)
     if rule == "c1a":
         sc.pop("take_rule", None)
         for t in sc["takes"]:
@@ -220,14 +388,15 @@ def _shown_segment(fid: dict, segments: list) -> int | None:
 
 
 def scene_for(sc: dict, speech: dict | None = None, *, noise: float = 0.0005, hide: tuple = (),
-              recolor: dict | None = None, phase: float = 0.0) -> dict:
+              recolor: dict | None = None, phase: float = 0.0, screen_spans: dict | None = None) -> dict:
     """What fake_ffmpeg should 'decode' for this recording's files.
 
     speech: {segment: [(t0, t1), ...]}: a 300 Hz tone at -14 dBFS standing in
     for a voice. hide: fiducials not drawn (("segment-start", k), ("event", id)),
     to exercise the fallbacks. recolor: {("event", id): "#123456"} draws one in
     another colour. phase: the files' frames sit at phase + k/fps instead of
-    k/fps (a video stream that starts late). Session-B marks (a /1 sidecar,
+    k/fps (a video stream that starts late). screen_spans (C1d): {segment:
+    [(t0, t1, pattern id)]}, the learned screens (build_sidecar's screens["spans"]). Session-B marks (a /1 sidecar,
     through catalog.as_v2) draw their full-screen cyan flash."""
     from peep import render
     recolor = recolor or {}
@@ -262,7 +431,28 @@ def scene_for(sc: dict, speech: dict | None = None, *, noise: float = 0.0005, hi
             audio.append({"t0": t0, "t1": t1, "freq": 300, "amp": 0.2})
         files[s["file"]] = {"duration": s["duration_s"], "video": video, "audio": audio, "noise": noise,
                             "phase": phase}
+        if screen_spans:                         # C1d: what the decoded thumbnails show
+            files[s["file"]]["screens"] = [{"t0": t0, "t1": t1, "pattern": pid}
+                                           for t0, t1, pid in screen_spans.get(k, [])]
+            files[s["file"]]["screen_noise"] = SCREEN_NOISE
+            files[s["file"]]["content_seed"] = CONTENT_SEED
     return {"fps": FPS, "files": files}
+
+
+def thumb_at(f: dict, t: float, fps: float, size: tuple) -> bytes:
+    """One decoded frame's thumbnail, as fake_ffmpeg draws it (C1d): a full-screen
+    flash as its colour's grey, a learned screen's pattern with the encoder's noise,
+    else the content of that frame."""
+    for span in f.get("video", []):
+        if span["where"] == "full" and span["t0"] <= t < span["t1"]:
+            c = span["color"].lstrip("#")
+            r, g, b = int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+            return bytes([(77 * r + 150 * g + 29 * b + 128) >> 8]) * (size[0] * size[1])
+    frame = int(t * fps + 1e-6)
+    for sp in f.get("screens", []):
+        if sp["t0"] <= t < sp["t1"]:
+            return pattern(sp["pattern"], size, noise=f.get("screen_noise", SCREEN_NOISE), frame=frame)
+    return pattern(f.get("content_seed", CONTENT_SEED) + frame, size)
 
 
 def leaked_frames(scene: dict, plan, res) -> list:
@@ -313,7 +503,7 @@ def synth_media_argv(ffmpeg: str, spec: dict, out: Path, size: str = "640x400") 
 class SceneAnalyzer:
     """render.Analyzer over a scene, in-process: the same synthesis fake_ffmpeg
     does, for testing resolve() without any process. `calls` records every
-    request; `fail` names what to refuse ("frames", "pcm", "max_db")."""
+    request; `fail` names what to refuse ("frames", "pcm", "max_db", "thumbs")."""
 
     def __init__(self, scene: dict, fail: tuple = ()):
         self.scene, self.fail, self.calls = scene, set(fail), []
@@ -358,6 +548,22 @@ class SceneAnalyzer:
         f, rate = self._file(seg), render.PCM_RATE
         end = min(start_s + dur_s, f["duration"])
         return [self._sample(f, k / rate, k) for k in range(math.ceil(start_s * rate - 1e-9), int(end * rate))]
+
+    def thumbs(self, seg, start_s, dur_s, size):
+        import math
+        from peep import render
+        self.calls.append(("thumbs", seg.index, round(start_s, 3), round(dur_s, 3), tuple(size)))
+        if "thumbs" in self.fail:
+            raise render.AnalysisError("ffmpeg exit 1: (scene) refused")
+        f, fps = self._file(seg), self.scene["fps"]
+        ph = f.get("phase", 0.0)
+        end = min(start_s + dur_s, f["duration"])
+        out, i = [], math.ceil((start_s - ph) * fps - 1e-6)
+        while ph + i / fps < end - 1e-9:
+            t = ph + i / fps
+            out.append((round(t, 6), thumb_at(f, t, fps, tuple(size))))
+            i += 1
+        return out
 
     def max_db(self, seg, start_s, dur_s):
         import math

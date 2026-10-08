@@ -4,7 +4,8 @@ and a RegisterHotKey listener on its own Win32 message-loop thread.
   parse_chord("Ctrl+Alt+R")       -> Chord(mods=MOD_CONTROL|MOD_ALT, vk=0x52, text="Ctrl+Alt+R")
   table_from_agent_config(cfg)    -> {"record": Chord, "mark": Chord, "discard": Chord,
                                      "pause": Chord, "take": Chord, "correct": Chord} (C1a;
-                                     C1c renamed retake to correct),
+                                     C1c renamed retake to correct; C1d adds learn_start and
+                                     learn_end, and refuses Ctrl+Alt+Space, reserved for C1e),
                                      refusing two actions on one chord
   HotkeyListener                  registers the table on a dedicated thread and
                                   calls on_hotkey(action, foreground) for each press
@@ -49,7 +50,9 @@ log = logging.getLogger("peep.hotkeys")
 
 MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, MOD_NOREPEAT = 0x1, 0x2, 0x4, 0x8, 0x4000
 ERROR_HOTKEY_ALREADY_REGISTERED = 1409
-ACTIONS = ("record", "mark", "discard", "pause", "take", "correct")
+ACTIONS = ("record", "mark", "discard", "pause", "take", "correct", "learn_start", "learn_end")
+# Chords no action may take: (mods, vk) -> why. C1e's expanded-pill toggle (ratified 2026-10-07).
+RESERVED = {(0x2 | 0x1, 0x20): "Ctrl+Alt+Space is reserved for the expanded pill (session C1e)"}
 
 _MODIFIERS = {"ctrl": MOD_CONTROL, "control": MOD_CONTROL, "alt": MOD_ALT, "shift": MOD_SHIFT,
               "win": MOD_WIN, "windows": MOD_WIN, "super": MOD_WIN}
@@ -151,6 +154,8 @@ def build_table(chords: dict[str, str]) -> dict[str, Chord]:
         except HotkeyError as exc:
             raise HotkeyError(f"{action}_hotkey: {exc}") from None
         key = (chord.mods, chord.vk)
+        if key in RESERVED:
+            raise HotkeyError(f"{action}_hotkey: {RESERVED[key]}")
         if key in seen:
             raise HotkeyError(f"{action}_hotkey and {seen[key]}_hotkey are both {chord.text}")
         seen[key] = action
@@ -161,7 +166,8 @@ def build_table(chords: dict[str, str]) -> dict[str, Chord]:
 def table_from_agent_config(agent_cfg) -> dict[str, Chord]:
     return build_table({"record": agent_cfg.record_hotkey, "mark": agent_cfg.mark_hotkey,
                         "discard": agent_cfg.discard_hotkey, "pause": agent_cfg.pause_hotkey,
-                        "take": agent_cfg.take_hotkey, "correct": agent_cfg.correct_hotkey})
+                        "take": agent_cfg.take_hotkey, "correct": agent_cfg.correct_hotkey,
+                        "learn_start": agent_cfg.learn_start_hotkey, "learn_end": agent_cfg.learn_end_hotkey})
 
 
 def describe_error(chord: Chord, winerror: int) -> str:

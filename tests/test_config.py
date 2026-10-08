@@ -34,7 +34,8 @@ class DefaultsTest(unittest.TestCase):
 
     def test_template_is_valid_toml_and_all_commented(self):
         data = tomllib.loads(c.TEMPLATE)
-        self.assertEqual(set(data), {"video", "audio", "flash", "output", "ffmpeg", "agent", "render"})  # C1b: render
+        self.assertEqual(set(data), {"video", "audio", "flash", "output", "ffmpeg", "agent", "render",
+                                     "auto_takes"})               # C1b: render; C1d: auto_takes
         self.assertTrue(all(v == {} for v in data.values()))
         self.assertEqual(c.from_mapping(data).video, c.Config().video)
 

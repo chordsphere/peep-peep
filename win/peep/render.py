@@ -20,6 +20,14 @@ What the cut is, start to finish:
              concealed instead (that corner held from the frame before the
              patch for the patch's ~200 ms; a full-screen mark flash, the
              whole frame), so no fiducial colour survives into the cut
+  screens   (C1d, auto-takes) a take edge made by a learned screen has no
+             patch: the edge is refined to the exact frame by comparing
+             decoded thumbnails (screens.py, the same 64x40 grey the sampler
+             used) with the screen's reference: an end screen's first frame
+             (followed back as far as render.screen_lookback_s when it was
+             learned while showing), a start screen's last. The screen's own
+             frames are never in the cut; a refinement that fails falls back
+             to the sample time, erring toward cutting more, loudly
   strays     (C1c) every other patch that is not the fiducial of a kept edge
              is concealed the same way when it lands in kept material: the
              red patch of a take close that a correction moved later, a
@@ -87,7 +95,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import catalog, events, ffmpeg_cmd, naming
+from . import catalog, events, ffmpeg_cmd, naming, screens
 from .config import Config, RenderConfig
 from .logsetup import event
 
@@ -158,6 +166,9 @@ class Fiducial:
     duration_s: float = 0.2        # how long it was up
     rect: dict | None = None       # patch rect, physical pixels of `screen`
     screen: dict | None = None
+    # C1d: style "screen", an edge made by a learned screen: {"screen": start|end, "ref", "thumb" (bytes),
+    # "size", "thresholds", "change": appear|gone, "from_learn", "period_s"} (see _screen_fiducial)
+    reference: dict | None = None
 
 
 NO_FIDUCIAL = Fiducial(None, "none", None, "none", 0.0)
@@ -272,7 +283,37 @@ def source_digest(v2: dict) -> str:
     body = {"segments": segs, "events": v2.get("events"), "takes": v2.get("takes"),
             "kept": (v2.get("summary") or {}).get("kept"),
             "marks": [[m.get("segment"), m.get("media_s"), m.get("label")] for m in v2.get("marks") or []]}
+    if isinstance(v2.get("auto_takes"), dict):     # C1d: only when a screen was learned (else C1c's digest)
+        body["auto_takes"] = [[r.get("ref"), r.get("thumb"), r.get("thresholds")]
+                              for r in v2["auto_takes"].get("references") or []]
     return hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+
+
+SCREEN_EVENT_KINDS = ("screen", "learn")          # C1d: events whose take edge is a learned screen
+
+
+def _screen_fiducial(ev: dict, refs: dict, epoch, launch, side: str) -> Fiducial | None:
+    """The fiducial of a take edge made by a learned screen (C1d), or None when
+    the sidecar does not hold its reference (then the edge is bare, said in
+    the plan's notes). `stamp_s`: the event's QPC on this segment's clock, the
+    first sample that saw the change (or the learn press)."""
+    r = refs.get(ev.get("ref"))
+    if not isinstance(r, dict):
+        return None
+    try:
+        w, h = (int(v) for v in r.get("size") or ())
+        thumb = screens.from_hex(r.get("thumb") or "", w, h)
+    except (TypeError, ValueError):
+        return None
+    stamp, quality = media_time(ev.get("qpc"), ev.get("since_ffmpeg_start_s"), epoch, launch)
+    hz = (r.get("sampler") or {}).get("hz") if isinstance(r.get("sampler"), dict) else None
+    period = 1.0 / float(hz) if isinstance(hz, (int, float)) and hz > 0 else 0.25
+    change = "gone" if ev.get("change") == "gone" else "appear"
+    return Fiducial(None, "screen", stamp, quality, 0.0,
+                    reference={"screen": r.get("screen") or ev.get("screen"), "ref": r.get("ref"), "thumb": thumb,
+                               "size": (w, h), "thresholds": r.get("thresholds"), "change": change,
+                               "from_learn": ev.get("kind") == "learn", "period_s": period, "side": side,
+                               "waited_s": ev.get("waited_s") if ev.get("kind") == "learn" else None})
 
 
 def build_plan(sc: dict, *, stem: str = "") -> Plan:
@@ -321,6 +362,8 @@ def build_plan(sc: dict, *, stem: str = "") -> Plan:
     epochs = {int(s.get("index") or 1): (s.get("video_epoch_qpc_est"), s.get("ffmpeg_started_qpc"))
               for s in v2.get("segments") or []}
     spans = segment_spans(v2)
+    auto = v2.get("auto_takes") if isinstance(v2.get("auto_takes"), dict) else {}
+    refs = {r.get("ref"): r for r in auto.get("references") or [] if isinstance(r, dict)}
 
     def shown_in(ev_id) -> int | None:
         """The segment the press's patch was shown in (not where the press was placed: a
@@ -336,6 +379,17 @@ def build_plan(sc: dict, *, stem: str = "") -> Plan:
         ev = ev_by_id.get(ev_id)
         fid = (ev or {}).get("fiducial")
         epoch, launch = epochs.get(seg_index, (None, None))
+        if (ev or {}).get("kind") in SCREEN_EVENT_KINDS and ev.get("segment") == seg_index:
+            sf = _screen_fiducial(ev, refs, epoch, launch, side="end" if ev.get("change") != "gone" else "start")
+            if sf is not None:
+                return sf
+            notes.append(f"event {ev_id} ({ev.get('screen')} screen) names reference {ev.get('ref')!r}, which the "
+                         f"sidecar does not hold: its edge falls back to the sample time")
+            stamp, quality = media_time(ev.get("qpc"), ev.get("since_ffmpeg_start_s"), epoch, launch)
+            return Fiducial(None, "screen", stamp if stamp is not None else press_s, quality, 0.0,
+                            reference={"missing": True, "screen": ev.get("screen"), "ref": ev.get("ref"),
+                                       "change": "gone" if ev.get("change") == "gone" else "appear",
+                                       "from_learn": ev.get("kind") == "learn", "period_s": 0.25})
         shown = fiducial_segment(fid, spans)
         if isinstance(fid, dict) and shown in (None, seg_index):
             f = _fiducial_from(fid, epoch, launch, default_style="full")
@@ -379,6 +433,8 @@ def build_plan(sc: dict, *, stem: str = "") -> Plan:
     for i, iv in enumerate(intervals):
         iv.start.adjustable = (not whole) or i > 0
         iv.end.adjustable = (not whole) or i < len(intervals) - 1
+        if i == 0 and iv.start.kind == "segment-start" and (take_by_id.get(iv.take) or {}).get("implicit"):
+            iv.start.adjustable = False        # C1d: the implicit take starts as a no-take recording does
     marks = []
     for m in v2.get("marks") or []:
         seg_i = m.get("segment") or m.get("after_segment")
@@ -781,6 +837,11 @@ class Analyzer:
         """The loudest sample over the window, dBFS, every track mixed."""
         raise NotImplementedError
 
+    def thumbs(self, seg: SegmentInfo, start_s: float, dur_s: float, size: tuple) -> list:
+        """C1d: [(pts_s, grey bytes)] for the frames in [start_s, start_s + dur_s), each
+        averaged down to `size` and made grey with screens' formula."""
+        raise NotImplementedError
+
 
 def _frame_index(t: float, fps: float, phase: float = 0.0) -> int:
     """The first frame at or after `t` (frames sit at phase + k/fps; a quarter
@@ -802,7 +863,8 @@ def grid_phase(frames: list, fps: float) -> float:
 
 
 def _resolve_boundary(bd: Boundary, seg: SegmentInfo, analyzer: Analyzer, rcfg: RenderConfig,
-                      cache: dict, run_of: int = 1) -> tuple[float, dict, Detection | None]:
+                      cache: dict, run_of: int = 1, floor: float | None = None
+                      ) -> tuple[float, dict, Detection | None]:
     """The time kept material starts (side start: the frame after the fiducial)
     or ends (side end: the fiducial's first frame), from detection, else from
     the stamp. Returns (time, sidecar record, detection)."""
@@ -813,6 +875,8 @@ def _resolve_boundary(bd: Boundary, seg: SegmentInfo, analyzer: Analyzer, rcfg: 
     if fid.style == "none":
         rec.update(method="nothing-shown", bound_s=_r(bd.nominal_s), fallback=None)
         return bd.nominal_s, rec, None
+    if fid.style == "screen":
+        return _resolve_screen(bd, seg, analyzer, rcfg, rec, floor=floor)
     key = (bd.segment, bd.kind, bd.event)
     center = fid.stamp_s if fid.stamp_s is not None else bd.nominal_s
     half = rcfg.search_s * (2 if fid.stamp_quality in ("approximate", "press") else 1)
@@ -860,6 +924,176 @@ def _resolve_boundary(bd: Boundary, seg: SegmentInfo, analyzer: Analyzer, rcfg: 
     return bound, rec, det
 
 
+SCREEN_CHUNK_S = 2.0               # a screen run reaching the window's edge is followed this much further at a time
+SCREEN_FOLLOW_S = 10.0             # ... up to this far past a sampled (not learned-on) event's stamp
+SELF_ANCHOR_MIN_FRAMES = 8         # a screen found from the video's own frame must hold at least this long
+
+
+def screen_edge(frames: list, ref: dict, stamp: float, side: str, thr: "screens.Thresholds",
+                loose: "screens.Thresholds", anchor_t: float | None = None
+                ) -> tuple[int | None, int | None, int | None, str | None]:
+    """Where a learned screen's run of frames is around one event, in decoded
+    thumbnails [(pts, grey)]: (first, last, anchor) indices of the run, or
+    (None, None, None, reason).
+
+    The anchor is a frame that matches the live reference within `loose` (the
+    decoded frames went through the encoder and ffmpeg's scaler; the reference
+    through GDI): for an end screen appearing, the matching frame nearest the
+    stamp (the first sample that saw it); for a start screen going away, the
+    matching frame nearest half a sample period before the stamp (the stamp is
+    the first sample that no longer saw it). `anchor_t` instead takes the frame
+    nearest that time as the anchor, unchecked against the reference (the
+    video's own frame where the screen is known to be up). The run is then
+    followed in both directions while frames match the *anchor* (same
+    pipeline, so the live thresholds hold; loose ones, so a fade's half-way
+    frames count as the screen and are cut with it)."""
+    if not frames:
+        return None, None, None, "no frames decoded in the search window"
+    for t, g in frames:
+        if len(g) != len(ref["thumb"]):
+            return None, None, None, f"decoded thumbnail has {len(g)} pixels, the reference {len(ref['thumb'])}"
+    if anchor_t is not None:
+        best = min(range(len(frames)), key=lambda i: abs(frames[i][0] - anchor_t))
+    else:
+        target = stamp if side == "end" else stamp - ref.get("period_s", 0.25) / 2
+        best = None
+        for i, (t, g) in enumerate(frames):
+            if side == "start" and t >= stamp + 1e-6:
+                continue                       # the screen was already gone by the stamp
+            if screens.is_match(screens.distance(g, ref["thumb"], thr.changed_level), loose):
+                if best is None or abs(t - target) < abs(frames[best][0] - target):
+                    best = i
+        if best is None:
+            closest = min((screens.distance(g, ref["thumb"], thr.changed_level).mad, t) for t, g in frames)
+            return None, None, None, (f"no frame matches the {ref.get('screen')} screen (closest mean difference "
+                                      f"{closest[0]:.1f} at {closest[1]:.3f}s)")
+    lo, hi = run_around(frames, best, thr, loose)
+    return lo, hi, best, None
+
+
+def run_around(frames: list, anchor: int, thr: "screens.Thresholds", loose: "screens.Thresholds") -> tuple[int, int]:
+    """The run of frames matching frame `anchor` (within `loose`), as (first, last) indices."""
+    a = frames[anchor][1]
+
+    def same(i):
+        return screens.is_match(screens.distance(frames[i][1], a, thr.changed_level), loose)
+    lo = hi = anchor
+    while lo > 0 and same(lo - 1):
+        lo -= 1
+    while hi < len(frames) - 1 and same(hi + 1):
+        hi += 1
+    return lo, hi
+
+
+def _resolve_screen(bd: Boundary, seg: SegmentInfo, analyzer: Analyzer, rcfg: RenderConfig,
+                    rec: dict, floor: float | None = None) -> tuple[float, dict, None]:
+    """C1d: an edge made by a learned screen, to the exact frame. An end screen:
+    kept material ends at its first frame, followed back past the window when
+    the run reaches its edge, down to `floor` (where the interval starts: what
+    lies before is cut anyway) and at most render.screen_lookback_s for a screen
+    learned while it was showing (SCREEN_FOLLOW_S otherwise). A start screen:
+    kept material starts at the frame after its last one.
+
+    When no decoded frame matches the live reference (another colour pipeline,
+    say), an end screen is found from the video's own frame where it is known
+    to be up: the learn's capture, or the first sample that saw it (loud, in
+    the fallbacks). Fallback, loud: an end at the stamp less a sample period and
+    the margin, a start at the stamp plus the margin, both erring toward
+    cutting more. For a screen learned while showing, a fallback cannot know
+    where it began: the line says that its earlier frames may remain."""
+    fid = bd.fiducial
+    ref = fid.reference or {}
+    rec.update(screen=ref.get("screen"), ref=ref.get("ref"), change=ref.get("change"),
+               from_learn=bool(ref.get("from_learn")))
+    frame_s = 1 / seg.fps
+    stamp = fid.stamp_s if fid.stamp_s is not None else bd.nominal_s
+    side = "end" if bd.side == "end" else "start"
+    period = ref.get("period_s", 0.25)
+
+    def fallback(reason: str) -> tuple[float, dict, None]:
+        bound = stamp - period - FALLBACK_MARGIN_S if side == "end" else stamp + FALLBACK_MARGIN_S
+        if side == "end" and ref.get("from_learn"):
+            reason += "; it was learned while showing, so its frames before the press may remain"
+        rec.update(method="stamp", fallback=reason)
+        bound = min(max(bound, 0.0), seg.duration_s)
+        rec["bound_s"] = _r(bound)
+        return bound, rec, None
+
+    if ref.get("missing") or not ref.get("thumb"):
+        return fallback("the sidecar does not hold this screen's reference")
+    thr = screens.Thresholds.from_dict(ref.get("thresholds"))
+    loose = thr.loosened(rcfg.screen_slack_mad, rcfg.screen_slack_pct)
+    floor_s = max(0.0, floor or 0.0) if side == "end" else 0.0
+    reach = rcfg.screen_lookback_s if (side == "end" and ref.get("from_learn")) else SCREEN_FOLLOW_S
+    w0 = max(floor_s, stamp - rcfg.search_s - (period if side == "end" else 0.0))
+    w1 = min(seg.duration_s, stamp + rcfg.search_s)
+    limit_lo = max(floor_s, stamp - reach) if side == "end" else w0
+    limit_hi = min(seg.duration_s, stamp + reach) if side == "start" else w1
+    if w1 - w0 < frame_s:
+        return fallback("no room to look: the edge sits at the start of its interval")
+    warning = None
+    try:
+        frames = list(analyzer.thumbs(seg, w0, w1 - w0, ref["size"]))
+        lo, hi, anchor, reason = screen_edge(frames, ref, stamp, side, thr, loose)
+        if reason is not None and side == "end" and frames and "pixels" not in reason:
+            # Where the screen is known to be up, as the video shows it (FIDUCIAL_LAG_S: a change reaches
+            # the capture ~40 ms after it happens): the learn's capture, or the middle of the samples
+            # that confirmed a sampled appearance, never its very first one (review, second pass).
+            if ref.get("from_learn"):
+                at = stamp + float(ref.get("waited_s") or 0.0) + FIDUCIAL_LAG_S
+            else:
+                at = stamp + period * (max(1, thr.hysteresis) - 1) / 2 + FIDUCIAL_LAG_S + frame_s
+            lo2, hi2, anchor2, _ = screen_edge(frames, ref, stamp, side, thr, loose, anchor_t=at)
+            began = frames[lo2][0] if anchor2 is not None else None
+            # a sampled appearance began after the last sample that did not see it
+            plausible = ref.get("from_learn") or (began is not None and began >= stamp - 2 * period - 0.1)
+            if anchor2 is not None and hi2 - lo2 + 1 >= SELF_ANCHOR_MIN_FRAMES and plausible:
+                warning = (f"the {ref.get('screen')} screen's live reference did not match the decoded video "
+                           f"({reason}); found it from the video's own frame at {frames[anchor2][0]:.3f}s instead")
+                rec["anchored"] = "video"
+                lo, hi, anchor, reason = lo2, hi2, anchor2, None
+        while reason is None and side == "end" and lo == 0 and w0 > limit_lo + frame_s / 2:
+            nw0 = max(limit_lo, w0 - SCREEN_CHUNK_S)
+            more = [f for f in analyzer.thumbs(seg, nw0, w0 - nw0, ref["size"]) if f[0] < frames[0][0] - frame_s / 2]
+            w0 = nw0
+            if not more:
+                break
+            frames, anchor = more + frames, anchor + len(more)
+            lo, hi = run_around(frames, anchor, thr, loose)
+        while reason is None and side == "start" and hi == len(frames) - 1 and w1 < limit_hi - frame_s / 2:
+            nw1 = min(limit_hi, w1 + SCREEN_CHUNK_S)
+            more = [f for f in analyzer.thumbs(seg, w1, nw1 - w1, ref["size"]) if f[0] > frames[-1][0] + frame_s / 2]
+            w1 = nw1
+            if not more:
+                break
+            frames = frames + more
+            lo, hi = run_around(frames, anchor, thr, loose)
+    except AnalysisError as exc:
+        reason = f"could not decode the search window: {exc}"
+    if reason is not None:
+        return fallback(reason)
+    first, last = frames[lo][0], frames[hi][0]
+    nxt = frames[hi + 1][0] if hi + 1 < len(frames) else last + frame_s
+    if side == "end":
+        bound = first
+        if lo == 0 and first > floor_s + frame_s / 2 and w0 > floor_s + frame_s / 2:
+            warning = (f"the {ref.get('screen')} screen was already up {stamp - first:.1f} s before; followed it "
+                       f"no further (render.screen_lookback_s), so earlier frames of it may remain")
+    else:
+        bound = nxt
+        if hi == len(frames) - 1 and w1 < seg.duration_s - frame_s:
+            bound = w1                                  # still up past the window: cut up to where we looked
+            warning = (f"the {ref.get('screen')} screen was still up {last - stamp:.1f} s after the sampler saw it "
+                       f"go; the cut starts after the frames examined")
+    rec.update(method="detected", detected_s=_r(first), last_frame_s=_r(last), frames=hi - lo + 1,
+               delta_ms=_r((bound - stamp) * 1000, 1), fallback=None)
+    if warning:
+        rec["warning"] = warning
+    bound = min(max(bound, 0.0), seg.duration_s)
+    rec["bound_s"] = _r(bound)
+    return bound, rec, None
+
+
 def _decode_levels(analyzer: Analyzer, seg: SegmentInfo, start: float, end: float) -> tuple[list, float]:
     start = max(0.0, start)
     end = min(end, seg.duration_s)
@@ -880,9 +1114,15 @@ def resolve(plan: Plan, analyzer: Analyzer, rcfg: RenderConfig, *, say: Callable
     def record(rec, n):
         rec["interval"] = n
         boundaries.append(rec)
+        if rec.get("warning"):                  # C1d: found, but with a caveat worth saying as loudly
+            fallbacks.append(f"segment {rec['segment']} {rec['kind']}: {rec['warning']}")
+            event(log, logging.WARNING, "render.screen_warning", segment=rec["segment"], event=rec.get("event"),
+                  warning=rec["warning"])
         if rec["method"] == "stamp":
             what = {"segment-start": "start flash", "segment-end": "stop flash", "take-open": "take patch",
                     "take-close": "take-close patch"}[rec["kind"]]
+            if rec.get("style") == "screen":
+                what = f"{rec.get('screen')} screen" + (" (gone)" if rec.get("change") == "gone" else "")
             fallbacks.append(f"segment {rec['segment']} {what} near {fmt_mmss(rec['stamped_s'])}: "
                              f"not found ({rec['fallback']}); used the stamp")
             event(log, logging.WARNING, "render.boundary_fallback", **{k: rec[k] for k in
@@ -905,7 +1145,7 @@ def resolve(plan: Plan, analyzer: Analyzer, rcfg: RenderConfig, *, say: Callable
         seg = plan.seg(iv.segment)
         say(f"interval {n + 1}/{len(plan.intervals)}: segment {seg.index} {fmt_mmss(iv.start_s)}-{fmt_mmss(iv.end_s)}")
         a, arec, _ = _resolve_boundary(iv.start, seg, analyzer, rcfg, cache)
-        b, brec, _ = _resolve_boundary(iv.end, seg, analyzer, rcfg, cache)
+        b, brec, _ = _resolve_boundary(iv.end, seg, analyzer, rcfg, cache, floor=a)
         fb = segment_flashes(seg)
         record(arec, n)
         record(brec, n)
@@ -1410,6 +1650,25 @@ def volume_argv(ffmpeg: str, path: str, start_s: float, dur_s: float, tracks: in
     return argv + ["-f", "null", "-"]
 
 
+def parse_thumbs(raw: bytes, stderr: bytes, size: tuple, start_s: float, fps: float) -> list:
+    """C1d: rawvideo rgb24 + showinfo -> [(pts_s, grey bytes)], grey by screens' formula."""
+    n = size[0] * size[1] * 3
+    pts = _frame_pts(stderr)
+    return [(pts[i] if i < len(pts) else start_s + i / fps, screens.grey_from_rgb(raw[i * n:(i + 1) * n]))
+            for i in range(len(raw) // n)]
+
+
+def _frame_pts(stderr: bytes) -> list:
+    """Each decoded frame's time from showinfo: the exact integer pts and time base
+    when every frame has one, else pts_time (6 significant digits)."""
+    tb = _TIME_BASE.search(stderr)
+    ints = [int(m.group(1)) for m in _PTS_INT.finditer(stderr)]
+    if tb and int(tb.group(2)) and len(ints) == len(_PTS.findall(stderr)):
+        num, den = int(tb.group(1)), int(tb.group(2))
+        return [v * num / den for v in ints]
+    return [float(m.group(1)) for m in _PTS.finditer(stderr)]
+
+
 def parse_frames(raw: bytes, stderr: bytes, grid: tuple, start_s: float, fps: float, median: bool) -> list:
     """rawvideo + showinfo stderr -> [(pts_s, rgb)]. A frame without a showinfo
     line (never seen) gets its time from its position."""
@@ -1467,6 +1726,10 @@ class FfmpegAnalyzer(Analyzer):
                                     track))
         n = len(out) // 2
         return list(struct.unpack(f"<{n}h", out[:n * 2]))
+
+    def thumbs(self, seg, start_s, dur_s, size):
+        out, err = self._run(frames_argv(self.ffmpeg, str(self.folder / seg.file), start_s, dur_s, None, size))
+        return parse_thumbs(out, err, size, start_s, seg.fps)
 
     def max_db(self, seg, start_s, dur_s):
         argv = volume_argv(self.ffmpeg, str(self.folder / seg.file), start_s, dur_s, len(seg.tracks))
@@ -1574,7 +1837,11 @@ def describe(plan: Plan, res: Resolved | None = None, argv: list | None = None) 
                else f"detected {b.get('frames')} frame(s) from {b.get('detected_s')}s" if b["method"] == "detected"
                else f"FALLBACK to the stamp: {b['fallback']}" if b["method"] == "stamp"
                else "nothing was shown there")
-        lines.append(f"  boundary seg{b['segment']} {b['kind']} ({b['color'] or '-'}): {how} -> {b['bound_s']}s")
+        shown = b["color"] or (f"{b.get('screen')} screen" + (" gone" if b.get("change") == "gone" else "")
+                               + (", learned on" if b.get("from_learn") else "") if b.get("style") == "screen"
+                               else "-")
+        lines.append(f"  boundary seg{b['segment']} {b['kind']} ({shown}): {how} -> {b['bound_s']}s"
+                     + (f" [{b['warning']}]" if b.get("warning") else ""))
     for s in res.seams:
         lines.append(f"  seam seg{s['segment']} {s['side']} {s['bound_s']}s -> {s['seam_s']}s ({s['how']}, "
                      f"{s['offset_ms']:+.0f} ms)")

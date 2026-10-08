@@ -44,7 +44,10 @@ recorded as events, corner-patch fiducials, and a naming audit. **Session
 C1b** (landed) renders from that record: the cut, `<stem>.cut.mp4`, beside the
 original, which is never modified. **Session C1c** replaces C1a's retake with
 the ratified correction chart (a two-level undo of the current take) and
-makes the REC pill say what each key does next. See [Editing while you record](#editing-while-you-record)
+makes the REC pill say what each key does next. **Session C1d** adds
+auto-takes: two learn keys teach this recording an end screen and a start
+screen, and their appearances become take boundaries, cut to the exact
+frame ([Auto-takes](#auto-takes-session-c1d)). See [Editing while you record](#editing-while-you-record)
 and [The cut](#the-cut-session-c1b).
 
 ## Install
@@ -91,6 +94,8 @@ points at `pythonw.exe %LOCALAPPDATA%\peep\app\peepw.py`.
 | `peep pause` / `peep resume` | Hard pause: capture stops and the segment is saved; resume starts the next segment of the same recording. Each waits until it has happened (`--no-wait` doesn't). Same as **Ctrl+Alt+P**. |
 | `peep take` | Open a take, or close the open one. Same as **Ctrl+Alt+T**. |
 | `peep correct` | Correct the current take ([the chart](#the-correction-key-session-c1c)): a closed take's close moves here; otherwise the take is dropped and a fresh one opens here. Prints what it did (`↺ correct: close moved +4.2 s; …`). `peep retake` is the same command, by its old name. Same as **Ctrl+Alt+Backspace**. |
+| `peep learn start\|end [--in S]` | Auto-takes (C1d): the agent learns the screen now showing as this recording's start screen (a take opens when it goes away) or end screen (it closes the open take). `--in 3` waits 3 s first, so you can bring the page up from a terminal. Prints what it did (`⇥ end screen learned · take 1 closed`). Same as **Ctrl+Alt+[** / **Ctrl+Alt+]**. Needs the agent running: it does the sampling. |
+| `peep forget start\|end` | Stop using a learned screen from now on (`⇥ end screen forgotten`). |
 | `peep agent install\|uninstall` | Add (and start) or remove the hotkey agent's Startup-folder entry. |
 | `peep agent start\|stop\|restart\|status\|reload` | Control the running agent; see below. |
 | `peep render [last\|STEM] [--force] [--dry-run]` | Render the cut, `<stem>.cut.mp4`, from the recording's event record (session C1b; see [The cut](#the-cut-session-c1b)). An up-to-date cut is left alone unless `--force`. `--dry-run` finds every flash and patch, places every seam, and prints the plan and the ffmpeg command without writing anything. A failed render says why, leaves the original untouched, and running it again retries. |
@@ -124,8 +129,10 @@ no tray icon; the REC pill and short on-screen messages are its only UI.
 | **Ctrl+Alt+P** | Hard pause / resume (session C1a). |
 | **Ctrl+Alt+T** | Open a take / close it (session C1a). |
 | **Ctrl+Alt+Backspace** | Correct the current take: move its close here, or drop it and restart it ([the chart](#the-correction-key-session-c1c), session C1c). |
+| **Ctrl+Alt+[** | Learn the screen now showing as this recording's **start screen**: a take opens when it goes away ([Auto-takes](#auto-takes-session-c1d), session C1d). |
+| **Ctrl+Alt+]** | Learn it as the **end screen**: it closes the open take at its first frame. |
 
-All six are set in `[agent]` in `config.toml`. If another app already
+All eight are set in `[agent]` in `config.toml`. If another app already
 owns a chord, the agent says so on screen and in `peep agent status`,
 naming the chord. It retries for a minute, because at login the shell may
 still be settling, and then tells you which config key to change.
@@ -193,6 +200,7 @@ cuts are decided at render from the events below.
 | **Take** | Ctrl+Alt+T (toggles) | `peep take` | The first press opens a take (a **blue** corner patch), the next closes it (**red**). Only material inside takes survives the render. With no take at all, the whole recording is kept, so a quick recording behaves as before. A take is also the soft pause: capture continues and the gap is cut at render. |
 | **Correction** | Ctrl+Alt+Backspace | `peep correct` (old name: `peep retake`) | A two-level undo of the current take (**yellow**): the first correction after a close moves the close here; otherwise the take is dropped and a fresh one opens here. [The chart](#the-correction-key-session-c1c) is the spec. |
 | **Mark** | Ctrl+Alt+M | `peep mark` | A chapter or attention point (**cyan**), never a cut. |
+| **Auto-take** | Ctrl+Alt+[ / Ctrl+Alt+] | `peep learn start\|end` | Learn a start / end screen; its appearances open and close takes ([below](#auto-takes-session-c1d)). No patch. |
 | **Discard** | Ctrl+Alt+X | | The whole recording, every segment. |
 
 - **Takes carry across a pause.** A take open when you pause is still open
@@ -276,13 +284,13 @@ state:
 
 ```
 No takes yet          ● 00:41  whole video kept
-                      T start take · P pause · M mark
+                      T start take · P pause · M mark · ] end
 
 Take open             ● 03:12  ◉ take 2 · 0:48
-                      T close · ⌫ restart take · P pause
+                      T close · ⌫ restart take · P pause · ] end
 
 Take just closed      ● 03:20  ○ 2 takes · 2:14 kept
-                      T next take · ⌫ move close here
+                      T next take · ⌫ move close here · [ start
 
 …after one ⌫          ● 03:24  ○ 2 takes · 2:18 kept
                       T next take · ⌫ drop take 2, restart
@@ -296,6 +304,11 @@ Feedback (1.5 s)      ⌫ close moved +4.2 s
                       ⌫ nothing to correct
 ```
 
+- **The learn keys (C1d)** close the hint where they fit (`· ] end`, `· [ start`;
+  the full words `end screen` / `start screen` when there is room): the key
+  of the screen not learned yet whose appearance would make a take boundary
+  now, from the same decision function. Once a screen is learned its key
+  leaves the hint. These three tails are the only change to C1c's mockups.
 - **The hint can't lie.** The second line is computed from the take state
   the recorder publishes, by the same function (`events.next_effect`) the
   recorder decides every Take and Correction press with. A key that would do
@@ -316,6 +329,178 @@ Feedback (1.5 s)      ⌫ close moved +4.2 s
 - The pill is still excluded from capture, and still in the corner opposite
   the fiducial patch (patch bottom-left when the pill is top-right): it grows
   away from its corner, never toward the patch. Smoke step 78 checks both.
+
+### Auto-takes (session C1d)
+
+Teach the recording what its end and start screens look like, and their
+appearances open and close takes for you: an outro card, a "be right back"
+page, a video's credits, a title slide. **This recording only**: learned
+screens are forgotten when it ends.
+
+| Event | No take open | Take open |
+|---|---|---|
+| **End screen** appears | Ignored, and the pill says so | Take **closes** at the first frame of the screen |
+| **Start screen** appears | Take **opens** when the screen goes away (the screen itself is not kept) | Ignored, and the pill says "take already open" |
+
+(The rules table, ratified 2026-10-07; it is the spec.)
+
+- **Implicit take.** A recording with no takes counts as one take running
+  from the start. The first end-screen appearance closes that implicit take
+  (it becomes take 1 in the sidecar, `implicit: true`), and the recording is
+  in take mode from then on. A recording with no take presses and no
+  end-screen appearance is unchanged: kept whole between its flashes. With
+  no take yet, nothing is open, so a start screen counts: learning or
+  seeing one first cuts what came before it.
+- **Alternation** falls out of the guards: a start screen only counts after
+  an end (or with no take open), an end only after a start (or the implicit
+  take).
+- **Correction (⌫) treats automatic boundaries like pressed ones.** They go
+  on the take's undo stack ([the chart](#the-correction-key-session-c1c)):
+  an automatic close can be moved, an automatically opened take can be
+  dropped (and a fresh take opens at the press). The implicit take too.
+  Learn presses and screens are not take-key presses, so a ⌫ right after an
+  automatic close is never "too fast".
+- **Learning.** Bring the screen up and press the learn key: it is captured
+  *now* (after up to 1 s for it to hold still) as that kind's reference.
+  Pressing it again replaces the reference from then on. One screen cannot
+  be both: learning a screen that matches the other kind's is refused on the
+  pill. Learning is **not retroactive** (appearances before the press do not
+  count), **but the appearance you learn on does count**: learning an end
+  screen while a take is open closes it at that screen's first frame, which
+  may be before the press (the render follows it back, up to
+  `render.screen_lookback_s`, 2 minutes). Learning while paused is refused.
+- **No corner patch** for anything automatic or for the learn presses: a
+  patch would draw over the very screen being matched. The press is recorded
+  in the sidecar instead.
+- **Paused:** nothing is sampled (nothing is recorded); everything carries
+  across the pause, like all take state.
+- **A start screen giving way straight to the end screen opens no take**
+  (nothing came between them). An automatic open never wins over the end
+  screen: if the start screen's going reaches the model before an end screen
+  learned on that same page, the take it opened closes where it opened, empty.
+- **A press wins over a screen that reaches the model after it.** The
+  sampler is up to half a second behind (two samples); a Take press made in
+  between is decided first, and a screen boundary that would sit before it
+  is ignored (`◇ end screen seen — a press came first`).
+
+**Chords.** `Ctrl+Alt+[` learns the start screen, `Ctrl+Alt+]` the end
+screen (`[agent] learn_start_hotkey`, `learn_end_hotkey`): an opening and a
+closing bracket. The probe found both free; `Ctrl+Alt+Home` / `End` were free
+too but not comfortable on this keyboard. If you rebind to
+`Ctrl+Alt+End`, note that Remote Desktop clients intercept it as the remote
+Ctrl+Alt+Del. `Ctrl+Alt+Space` is reserved for the expanded pill (session
+C1e): config refuses it for any key.
+
+**From WSL** (terminal recordings, or any): `peep learn end`, `peep learn
+start --in 3` (wait 3 s while you switch to the page), `peep forget start`.
+They go to the agent, which does the sampling, and print the pill's line.
+
+**What you see on the pill** (its feedback line, 1.5 s):
+
+```
+⇥ end screen learned · take 1 closed          learned while a take (or the implicit one) was open
+⇥ start screen learned · opens a take when gone
+⇥ not learned: that is the end screen         the screen matches the other one
+⇥ start screen: not while paused
+◇ end screen → take 2 closed                  seen by the sampler
+◇ start screen up → take opens when it goes
+◇ start screen gone → take 3 opened
+◇ start screen gone — the end screen is up    it gave way straight to the end screen: no take
+◇ end screen seen — no take open
+◇ start screen seen — take already open
+```
+
+**How it works.**
+- **The sampler** is a thread in the agent. While a recording is
+  capturing and a screen is learned, it takes a 64x40 grey thumbnail of the
+  screen 4 times a second (GDI `StretchBlt` with `HALFTONE` into a tiny DIB,
+  physical pixels). It stops when nothing is learned and while paused. The
+  probe measured ~13 ms of CPU per sample (about 5 % of one core of eight;
+  no measurable change in system load at 4 Hz). `peep agent status --json`
+  shows `sampler.cpu_ms_per_sample` live.
+- **What it cannot see** (probe, 2026-10-08): windows excluded from capture,
+  exactly as ddagrab: the pill, the toasts and the dialog never reach a
+  sample. GDI sees layered windows and a hardware-decoded browser video the
+  same as ddagrab. The mouse pointer is not in the samples (it is in the
+  recording; the render tolerates it). DRM-protected video was not tried:
+  both captures may see it black (★ smoke step 88).
+- **Matching.** Two numbers compare a sample with a reference: the mean
+  absolute difference of the pixels, and the share of pixels that changed
+  by more than 24. A sample *matches* at ≤ 8 and ≤ 8 %; it is a clear *miss*
+  above 12 or 15 %; in between it is neither. A screen appears after 2
+  matching samples in a row and goes away after 2 misses, so one noisy
+  sample never toggles a take. The probe's pages: hover effects moved a page
+  by up to 4.9 (3 %), a three-line scroll by 10.5–22 (17–37 %), another page
+  by 90+. All in `[auto_takes]`, recorded with every reference.
+- **The render** refines every automatic edge to the exact frame: it decodes
+  thumbnails around the event, downscaled the same way, finds the screen's
+  run of frames, and cuts at the end screen's first frame or after the start
+  screen's last, so the screen's own frames are not in the cut. A screen
+  learned while it was showing is followed back to where it began (never
+  past the take's own start). If the live reference matches no decoded frame
+  (another colour pipeline), the screen is found from the video's own frame
+  where it is known to be up, and the render says so. If even that fails (a
+  decode error), it falls back to the sample time, erring toward cutting
+  more, and says so like every other fallback; for a screen learned while
+  showing, that line also says its earlier frames may remain, because then
+  nothing knows where it began. `peep render --dry-run` shows each edge:
+  `boundary seg1 take-close (end screen, learned on): detected …`.
+
+```toml
+[agent]
+learn_start_hotkey = "Ctrl+Alt+["
+learn_end_hotkey = "Ctrl+Alt+]"
+[auto_takes]
+enabled = true
+sample_hz = 4.0            # thumbnails a second while a screen is learned
+thumb_width = 64           # 64x40 on 2560x1600
+match_mad = 8.0            # a match: mean |difference| <= this (0..255) ...
+match_changed_pct = 8.0    # ... with at most this % of pixels changed (by more than changed_level)
+miss_mad = 12.0            # a clear miss above this ...
+miss_changed_pct = 15.0    # ... or above this % changed
+changed_level = 24
+hysteresis = 2             # samples in a row to appear / to go away
+learn_wait_ms = 1000       # a learn waits up to this for the screen to hold still (100..5000)
+[render]
+screen_slack_mad = 6.0     # extra difference allowed between a decoded frame and the live reference
+screen_slack_pct = 6.0
+screen_lookback_s = 120.0  # how far back a screen learned while showing is followed
+```
+
+**For the expanded pill (C1e): active.json's `auto_takes` block.** The
+recorder publishes it with every press and every screen event (and at each
+segment start), next to `take_state`:
+
+```
+"auto_takes": {
+  "start": {
+    "learned": true,                 false until learned (and again after `peep forget`)
+    "ref": "start-4120-2",           the reference's id: kind, the agent's pid, a count (events name it)
+    "learned_at": "2026-10-08T…",    wall clock of the learn press; "learned_qpc" its QPC
+    "stable": true,                  false: the screen was still moving after 1 s
+    "present": false,                on screen now, as the sampler last reported
+    "pending": true,                 start only: seen with no take open, a take opens when it goes
+    "seen": 3,                       appearances counted (the one learned on included)
+    "last_seen_at": "…", "last_seen_qpc": 1234.5,
+    "last_effect": {"event": 7, "action": "pending", "take": 3},
+                                     action: close | pending | open | ignored (with "reason":
+                                     no-take-open | take-already-open | end-screen-up |
+                                     earlier-than-the-last-boundary)
+    "learns": 1,                     learn presses for this screen, refused ones included
+    "last_learn": {"event": 5, "outcome": "learned" | "relearned" | "refused", "reason": …, "ref": …},
+    "thumb": "C:\\Users\\chord\\AppData\\Local\\peep\\state\\auto-takes\\<uid>.start-4120-2.png",
+                                     the reference as an 8-bit grey PNG (64x40); null when not learned
+    "size": [64, 40], "thresholds": {…}
+  },
+  "end": { … the same, without "pending" },
+  "at": "2026-10-08T…"
+}
+```
+
+`take_state` gains `implicit` (no take yet: an end screen would close the
+whole-video take), `start_pending`, and `screens: {start|end: {learned,
+present}}`. The PNGs live under `state\auto-takes\` only while their
+recording does; the sidecar keeps every reference as hex.
 
 What lands on disk for a recording with two pauses:
 
@@ -351,7 +536,9 @@ discard deletes it with the rest.
    first green one. No warm-up, no flash, no clap tone: the tone plays during
    the magenta.
 3. **Only the takes**, when there are takes (`summary.kept`); with no take
-   at all, everything. Each take's corner patches (blue, red, yellow) are
+   at all, everything. An edge made by a learned screen (C1d) is cut at the
+   end screen's first frame or after the start screen's last, found in the
+   video; the screen's frames are never in the cut. Each take's corner patches (blue, red, yellow) are
    excluded with the material outside the take. A patch left inside a take
    (C1c: the red patch of a close that a correction moved later) is hidden
    like a mark's, below.
@@ -391,6 +578,9 @@ nothing else changes.
   render's output says `N fallback(s)`, the log has a
   `render.boundary_fallback` warning, and the sidecar's `render` block
   records the reason.
+- **Screens (C1d).** An automatic edge has no patch: the render decodes
+  thumbnails around it and finds the learned screen's own frames (see
+  [Auto-takes](#auto-takes-session-c1d)).
 - **Inspecting a render.** `peep render --dry-run` shows every boundary,
   detected or not, before anything is written.
 
@@ -473,7 +663,8 @@ C:\Users\chord\Videos\peep\            storage root (config: root)
   logs\agent.log                       the agent's own log, same format
   state\active.json, stop-request      control files between `rec` and `stop` (active.json now has a status)
   state\mark-*.json                    one per mark request, consumed by the recorder
-  state\agent.json, agent-command      the agent's pid/status, and `peep agent stop|reload`
+  state\agent.json, agent-command      the agent's pid/status, and `peep agent stop|reload` (C1d: `learn|forget KIND`)
+  state\auto-takes\<uid>.<ref>.png     a learned screen's thumbnail, while its recording lasts (C1d)
   agent-prefs.json                     the agent's last-used collection
   clap.wav                             the 120 ms start tone (written on first use; also doctor's test tone)
   app\                                 the installed Windows package
@@ -555,6 +746,21 @@ describe segment 1, so a one-segment recording reads exactly as before.
 - `render` (session C1b): what the last render decided and produced; see
   [The cut](#the-cut-session-c1b). A `/1` sidecar gets the block too and
   stays `/1`.
+- **Auto-takes (C1d), additive, still `peep.sidecar/2`.** `events` gain three
+  kinds: `learn` (`screen`, `ref`, `stable`, `waited_s`, `same_as_current`,
+  `action` `learned`/`relearned` or `ignored` with the refusal, and
+  `screen_effect`: what the appearance learned on did), `forget`, and
+  `screen` (`source: visual`, `screen`, `change` `appear`/`gone`, `ref`,
+  `score` {`mad`, `changed_pct`}, `samples`, and the `action` or the
+  `ignored` reason). None has a `fiducial`. A take closed by the first end
+  screen of a recording with no takes is take 1 with `implicit: true` and
+  `open: {"implicit": true, "segment": 1, "media_s": 0.0, …}`. The
+  top-level `auto_takes` block (only when a screen was learned) has `rule:
+  "auto-takes/1"`, `references` (every one learned, in order: `ref`,
+  `screen`, `event`, `qpc`, `size`, the thumbnail as hex, `thresholds`,
+  `sampler`, `replaces`), `current`, and `pending_start`. A recording that
+  learns nothing has exactly C1c's sidecar, and its cut and its
+  `source_digest` are unchanged (tested against the code before C1d).
 
 *Migration:* `/1` sidecars still load. Readers call `catalog.as_v2()`, which
 presents one as a single segment with no takes (the whole recording kept);
@@ -714,6 +920,7 @@ duration_ms = 200          # 150 measured 4-5 frames; raised for margin after th
 record_hotkey = "Ctrl+Alt+R"
 pill_position = "top-right"
 take_hotkey = "Ctrl+Alt+T"     # also pause_hotkey, correct_hotkey; debounce_ms = 1000; pill_hints = true
+learn_end_hotkey = "Ctrl+Alt+]"  # C1d, with learn_start_hotkey; [auto_takes] has the sampler's thresholds
 ```
 
 If Windows renumbers the mic (the `(6- ...)` part), an empty `audio.device`
@@ -756,6 +963,25 @@ catalog, plus both sidecar versions. `test_c1a_surface.py` covers the chords,
 the pill, the dialog, the WSL commands and the reproduction of the
 2026-10-06 naming report. The Tk windows themselves (the patch, the
 dialog's preview line) need a desktop: smoke steps 51–58.
+
+Session C1d added five test files. `test_screens.py`: the thumbnail
+distance against the probe's numbers, the hysteresis on synthetic streams
+(one noisy sample never toggles; the band between match and miss continues
+neither run), learning's stable capture, the PNG. `test_auto_takes.py`:
+every row of the rules table with its pill line, the implicit take,
+alternation, the correction interplay, learning, and the hint and feedback
+held against what the model does in 500 random sequences with screens.
+`test_auto_agent.py`: the sampler step by step, the agent's learn keys and
+`peep learn|forget`, confirmation through active.json, a restarted agent
+reading a reference back from its PNG. `test_auto_recorder.py`: the requests
+through the real recorder. `test_auto_render.py`: frame-exact refinement,
+the fallbacks, a fuzzer (random screens, learns, forgets, takes,
+corrections and marks through the real hysteresis, model and render: no
+fiducial and no screen frame in any cut), the same render through
+fake_ffmpeg, and the proof that recordings which never learn a screen cut
+exactly as before: 120 random C1c/C1a recordings hash to the value the code
+before C1d gave. `render_fixtures.py` simulates the agent's sampler over
+synthetic screens; `fake_ffmpeg.py` draws them into thumbnail decodes.
 
 Session C1c added three test files. `test_correction.py` has every row of the
 correction chart as its own test, the consequences, and the pill's promise:
@@ -1088,6 +1314,62 @@ marked ★ are the open questions the build could not answer itself.
     `peep config set agent.take_hotkey F13`: the hint reads `F13 start take`;
     unset it after.
 
+### Learned screens (session C1d)
+
+Two browser tabs help: a page to work on, and a distinct page to use as the
+screen (a "be right back" slide, an outro card); a third for a start screen.
+
+80. Run `peep agent restart`. `peep agent status` lists `learn_start` on
+    `Ctrl+Alt+LeftBracket` and `learn_end` on `Ctrl+Alt+RightBracket`, both
+    `registered`, and `sampler` not running (nothing learned yet).
+81. **An end screen, no takes (the implicit take).** Ctrl+Alt+R on the work
+    tab, talk ~10 s, switch to the end tab, press **Ctrl+Alt+]**. No square;
+    the pill shows `⇥ end screen learned · take 1 closed`, then `○ 1 take ·
+    0:1x kept`. Stop. `peep render last --dry-run` lists `(end screen,
+    learned on): detected … from <the switch>`. Step through the cut's end
+    (mpv `.`): the last frame is the work tab, the end tab never appears.
+82. **Learn both and alternate.** New recording. Switch to the start tab,
+    press **Ctrl+Alt+[** (`⇥ start screen learned · opens a take when
+    gone`). Switch to work: `◇ start screen gone → take 1 opened`. Talk,
+    switch to the end tab, press ]: `⇥ end screen learned · take 1 closed`.
+    Now just switch tabs: start tab (`◇ start screen up → take opens when it
+    goes`), work (`◇ start screen gone → take 2 opened`), talk, end tab
+    (`◇ end screen → take 2 closed`). Stop. The cut is two takes, each from
+    the first work frame after the start tab to the last one before the end
+    tab; neither page appears in it. The sidecar has `auto_takes` and
+    `screen` events.
+83. **Ignored while open.** Learn both as in 82; while a take is open, flip
+    to the start tab and back: `◇ start screen seen — take already open`, and
+    the take goes on (the start tab stays in it: ignored means ignored). With
+    no take open (after the end tab), flip to the end tab again: `◇ end
+    screen seen — no take open`.
+84. **⌫ after an automatic close.** After `◇ end screen → take N closed`, go
+    back to the work tab, talk 3 s, press ⌫: `⌫ close moved +x s` (the end
+    tab is now inside the take: you moved its close). ⌫ again (after a
+    second): `⌫ take N dropped · take N+1 started`.
+85. **Refusal.** On the end tab, press **[**: `⇥ not learned: that is the
+    end screen`. Pause (Ctrl+Alt+P) and press ]: `⇥ end screen: not while
+    paused`.
+86. ★ **Exclusion and cost.** During 82 the pill and its feedback sit over
+    the pages while they are sampled: no screen ever appears or goes because
+    of them (the probe found GDI leaves them out). Note
+    `sampler.cpu_ms_per_sample` from `peep agent status --json` during a
+    recording with a QSV capture and a background render (probe: ~13 ms).
+87. ★ **Tolerance on your pages.** Learn an end screen on a page with a
+    clock or a blinking caret: it stays seen. Scroll it three lines: it goes
+    (`present: false` in active.json). Note any false match between two
+    similar pages of one site; `[auto_takes] match_mad` / `match_changed_pct`
+    tune it.
+88. ★ **Video.** Learn the end screen on a still frame of a YouTube video's
+    credits and let it play into them: seen (the probe found GDI sees
+    browser video as ddagrab does). If you have a DRM service (Netflix in
+    Edge), try the same and note whether it is ever seen; the recording
+    itself may be black there too.
+89. **From WSL.** In a terminal recording (`peep rec`), `peep learn end --in
+    3`, then switch to the page: the terminal prints `⇥ end screen learned ·
+    take 1 closed`. `peep forget end` prints `⇥ end screen forgotten`; flipping
+    to the page then does nothing.
+
 ## Troubleshooting
 
 - **The cut is missing a word at a seam, or keeps too much silence:**
@@ -1125,6 +1407,18 @@ marked ★ are the open questions the build could not answer itself.
   `[agent] debounce_ms` changes it.
 - **The pill is too wide:** `peep config set agent.pill_hints false` keeps
   only its first line (each press's feedback still shows briefly).
+- **A learned screen is not seen, or seen when it should not be:** the
+  sidecar's `screen` events carry each sample's `score` (`mad`,
+  `changed_pct`); compare them with `[auto_takes]` (match ≤ 8 / 8 %, miss >
+  12 / 15 %). `peep agent status --json` shows the sampler (`running`,
+  `screens`, `errors`, `last_error`, `mismatched`). Nothing is sampled while
+  paused, and only the primary screen is sampled (ddagrab's output 0). If
+  the screen's resolution or scaling changes mid-recording, a learned screen
+  can no longer match: a toast says so once; learn it again.
+- **An automatic edge fell back:** the render could not find the screen's
+  frames near the event; `peep render --dry-run` says why, and the cut erred
+  toward cutting more. `render.screen_slack_mad` widens what counts as the
+  screen in the decoded video.
 - **A hotkey does nothing:** `peep agent status` says whether the agent is
   running and whether each chord registered. A chord another app holds
   shows `FAILED: Ctrl+Alt+R is already taken`; pick another in `[agent]`.

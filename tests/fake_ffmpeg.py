@@ -28,6 +28,9 @@ Session C1b adds the render's two kinds of invocation:
             tones in it. Frames come out as rgb24 with showinfo-style
             `pts_time:` lines on stderr, audio as s16le, levels as volumedetect's
             `max_volume:` line. A file the scene does not know yields nothing.
+            C1d: a decode scaled to anything but the 16x10 flash grid, without a crop,
+            of a file whose scene has "screens", is a learned-screen thumbnail: the
+            screen's pattern (plus the encoder's noise) or the frame's content.
   render    (-filter_complex with -progress): `-progress` lines on stdout, then
             a small file at the output path.
   modes     fail-analysis (every analysis exits 1), fail-render (every render
@@ -90,6 +93,37 @@ def color_at(f, t, patch_area):
     return bytes(f.get("background", [60, 60, 60]))
 
 
+def screen_pixel(seed, i):
+    """A copy of render_fixtures.pattern_pixel (C1d; test_auto_render checks they agree)."""
+    x = (seed * 2654435761 + i * 40503 + 12345) & 0xFFFFFFFF
+    x ^= x >> 13
+    x = (x * 1103515245 + 12345) & 0xFFFFFFFF
+    return (x >> 16) & 0xFF
+
+
+def thumb_rgb(f, t, fps, w, h):
+    """C1d: a learned-screen thumbnail decode (scale to WxH, no crop, anything but the
+    16x10 flash grid): rgb24 with r = g = b, the grey render_fixtures.thumb_at draws."""
+    for span in f.get("video", []):
+        if span["where"] == "full" and span["t0"] <= t < span["t1"]:
+            r, g, b = hex_rgb(span["color"])
+            return bytes([(77 * r + 150 * g + 29 * b + 128) >> 8] * 3) * (w * h)
+    frame = int(t * fps + 1e-6)
+    seed, noise = f.get("content_seed", 100000) + frame, 0
+    for sp in f.get("screens", []):
+        if sp["t0"] <= t < sp["t1"]:
+            seed, noise = sp["pattern"], f.get("screen_noise", 3)
+            break
+    out = bytearray()
+    for i in range(w * h):
+        v = screen_pixel(seed, i)
+        if noise:
+            v += screen_pixel(frame + 7919, i) % (2 * noise + 1) - noise
+        v = min(255, max(0, v))
+        out += bytes((v, v, v))
+    return bytes(out)
+
+
 def sample_at(f, t, n):
     v = 0.0
     for tone in f.get("audio", []):
@@ -124,9 +158,10 @@ if analysis:
         i = math.ceil((ss - ph) * fps - 1e-6)
         n = 0
         say("[Parsed_showinfo_3 @ 0x0] config in time_base: 1/15360, frame_rate: 30/1")
+        thumbs = "crop=" not in vf and (w, h) != (16, 10) and "screens" in f
         while ph + i / fps < end - 1e-9:
             t = ph + i / fps
-            out.write(color_at(f, t, "crop=" in vf) * (w * h))
+            out.write(thumb_rgb(f, t, fps, w, h) if thumbs else color_at(f, t, "crop=" in vf) * (w * h))
             say(f"[Parsed_showinfo_3 @ 0x0] n:{n:4d} pts:{round(t * 15360):8d} pts_time:{t:.6g} duration:512")
             i += 1
             n += 1

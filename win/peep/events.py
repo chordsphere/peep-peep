@@ -32,6 +32,27 @@ The model, as ratified (2026-10-06; the correction chart 2026-10-07):
             at the resume, and the segment boundary is a cut with nothing
             to remove. Pause / resume never touch the undo stack; a close
             moved later across a pause makes the take span the pause.
+  screens   (C1d, auto-takes; ratified 2026-10-07) two learnable screens. The
+            agent's sampler reports when a learned screen appears or goes
+            away (kind "screen", source "visual"); a learn press reports the
+            screen it captured (kind "learn"). The rules, decided by
+            next_effect like every other boundary:
+                                  no take open              take open
+              end screen appears  ignored ("no take open")  the take closes at
+                                                            the screen's first frame
+              start screen        the take opens when it    ignored ("take already
+              appears             goes away (the screen     open")
+                                  itself is not kept)
+            Implicit take: a recording with no takes counts as one take
+            running from the start; the first end-screen appearance closes it
+            (take 1, `implicit`), and the recording is in take mode from then
+            on. Alternation falls out of the guards. Automatic boundaries go
+            on the take's undo stack exactly like pressed ones, so a
+            correction moves an automatic close or drops an automatically
+            opened take. Learning counts the appearance it is learned on (not
+            earlier ones). Learn presses and visual events are not take-key
+            presses: neither opens the correction's debounce window, so a
+            correction right after an automatic close is never "too fast".
 
 The chart is decided in one place, `next_effect(state, kind)`: the model's
 own take and correct handlers call it to know what to do, and the pill calls
@@ -56,15 +77,15 @@ with nothing to migrate. New sidecars say `take_rule: "correction/1"`;
 its absence means C1a's rule decided the takes.
 
 Sections:
-  1. Records                    (~line 70)
-  2. The chart (pure)           (~line 120)
-  3. EventModel                 (~line 195)
-  4. Summary (kept / total)     (~line 510)
+  1. Records                    (~line 95)
+  2. The chart (pure)           (~line 150)
+  3. EventModel                 (~line 260)
+  4. Summary (kept / total)     (~line 760)
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # ---------------------------------------------------------------------------
 # 1. Records
@@ -73,9 +94,12 @@ from dataclasses import dataclass
 TAKE, CORRECT, PAUSE, RESUME, PAUSE_TOGGLE, MARK = "take", "correct", "pause", "resume", "pause-toggle", "mark"
 RETAKE = "retake"                       # C1a's name for the correction key: accepted wherever a kind is read
 KIND_ALIASES = {RETAKE: CORRECT}
-KINDS = (TAKE, CORRECT, PAUSE, RESUME, PAUSE_TOGGLE, MARK)
+# Session C1d (auto-takes): a learn press, a forget command, and a visual event from the agent's sampler.
+LEARN, FORGET, SCREEN = "learn", "forget", "screen"
+KINDS = (TAKE, CORRECT, PAUSE, RESUME, PAUSE_TOGGLE, MARK, LEARN, FORGET, SCREEN)
 # The chord a press belongs to, for the debounce: pause, resume and the toggle share one.
-CHORD = {TAKE: "take", CORRECT: "correct", PAUSE: "pause", RESUME: "pause", PAUSE_TOGGLE: "pause", MARK: "mark"}
+CHORD = {TAKE: "take", CORRECT: "correct", PAUSE: "pause", RESUME: "pause", PAUSE_TOGGLE: "pause", MARK: "mark",
+         LEARN: "learn", FORGET: "forget", SCREEN: "screen"}
 DEBOUNCED_CHORDS = ("take", "correct", "pause")
 # Which accepted presses open each chord's debounce window. Take and pause: their own hotkey presses
 # (C1a decision 5). Correct: the chart's "within 1 s of the previous accepted press", literally: the last
@@ -84,6 +108,16 @@ ANY_PRESS = "*"
 DEBOUNCE_AGAINST = {"take": ("take",), "correct": ANY_PRESS, "pause": ("pause",)}
 DEFAULT_DEBOUNCE_S = 1.0
 TAKE_RULE = "correction/1"              # the sidecar's `take_rule`; absent in C1a's sidecars (the retake rule)
+AUTO_RULE = "auto-takes/1"              # the sidecar's auto_takes.rule (C1d), present once a screen is learned
+SCREEN_KINDS = ("start", "end")
+# What next_effect decides for the visual rules (C1d): an end screen appearing, a start screen
+# appearing, and a counted start screen going away.
+END_SCREEN, START_SCREEN, START_GONE = "end-screen", "start-screen", "start-screen-gone"
+# Visual events that change nothing anyone should be told about: no feedback line, no new feedback seq.
+QUIET_IGNORED = ("stale-reference", "already-present", "not-present", "unknown-change", "not-pending")
+# The payload a learn / forget / screen request carries besides kind and time (Press.extra).
+EXTRA_KEYS = ("screen", "change", "score", "ref", "thumb", "size", "thresholds", "stable", "waited_s",
+              "same_as_current", "refused", "sampler", "samples")
 
 
 def canonical_kind(kind: str) -> str:
@@ -98,9 +132,10 @@ class Press:
     kind: str
     qpc: float | None            # the requester's QPC at the press (None: an old request file)
     at: str | None = None        # the requester's wall clock, ISO
-    source: str = "cli"          # hotkey | cli
+    source: str = "cli"          # hotkey | cli | visual (C1d: the agent's sampler)
     label: str = ""
     requested_as: str = ""       # the alias the request used ("retake"), when it used one
+    extra: dict = field(default_factory=dict, compare=False, hash=False)   # C1d: EXTRA_KEYS of the request
 
     @classmethod
     def from_request(cls, req: dict) -> "Press":
@@ -109,7 +144,8 @@ class Press:
         kind = canonical_kind(raw)
         return cls(kind=kind, qpc=float(qpc) if isinstance(qpc, (int, float)) else None,
                    at=req.get("requested_at"), source=str(req.get("source") or "cli"),
-                   label=str(req.get("label") or ""), requested_as=raw if raw != kind else "")
+                   label=str(req.get("label") or ""), requested_as=raw if raw != kind else "",
+                   extra={k: req[k] for k in EXTRA_KEYS if k in req})
 
 
 def _r(x: float | None, nd: int = 3) -> float | None:
@@ -140,22 +176,31 @@ def take_mode(takes: list[dict]) -> tuple[str, dict | None]:
 
 
 def next_effect(state: dict, kind: str) -> dict:
-    """What one press of `kind` (take | correct) does in `state` (a take_state()
-    snapshot, or the model's own): the chart, in one function.
+    """What one press of `kind` (take | correct), or one visual event (C1d:
+    end-screen | start-screen | start-screen-gone), does in `state` (a
+    take_state() snapshot, or the model's own): the chart and the auto-take
+    rules, in one function.
 
       {"action": "open",  "take": n}                 a take opens (n: its id)
       {"action": "close", "take": n}                 take n closes
+      {"action": "close", "take": 1, "implicit": True}
+                                                     the implicit whole-video take closes (C1d)
+      {"action": "pending", "take": n}               a start screen is up: take n opens when it goes (C1d)
       {"action": "moved-close", "take": n}           take n's close moves to this press
       {"action": "dropped-take", "dropped": n, "take": m}
                                                      take n is dropped, fresh take m opens here
-      {"action": "ignored", "reason": "nothing-to-correct"}
+      {"action": "ignored", "reason": "nothing-to-correct" | "no-take-open" | "take-already-open"
+                                      | "not-pending" | "end-screen-up"}
 
     Debounce is not here: it depends on time, not on the take state, and is
-    decided before this (EventModel.press)."""
+    decided before this (EventModel.press). Neither is the ordering guard for
+    a visual event that arrives after a later press (EventModel._too_early)."""
     kind = canonical_kind(kind)
     mode, take = state.get("mode", NONE), state.get("take")
     undo = list(state.get("undo") or [])
     fresh = state.get("next_take") or 1
+    if kind in (END_SCREEN, START_SCREEN, START_GONE):
+        return _screen_effect(state, kind, mode, take, fresh)
     if kind == TAKE:
         if mode == OPEN:
             return {"action": "close", "take": take}
@@ -169,9 +214,49 @@ def next_effect(state: dict, kind: str) -> dict:
     raise ValueError(f"next_effect: {kind!r} is not a take-stack key (take | correct)")
 
 
+def _screen_effect(state: dict, kind: str, mode: str, take, fresh: int) -> dict:
+    """The rules table (C1d, ratified 2026-10-07). `implicit`: no take exists
+    yet, so the whole recording counts as one take from the start; an old
+    snapshot without the key is read from next_take."""
+    implicit = state.get("implicit", fresh == 1)
+    if kind == END_SCREEN:
+        if mode == OPEN:
+            return {"action": "close", "take": take}
+        if mode == NONE and implicit:
+            return {"action": "close", "take": 1, "implicit": True}
+        return {"action": "ignored", "reason": "no-take-open"}
+    if kind == START_SCREEN:
+        if mode == OPEN:
+            return {"action": "ignored", "reason": "take-already-open"}
+        return {"action": "pending", "take": fresh}
+    if not state.get("start_pending"):
+        return {"action": "ignored", "reason": "not-pending"}
+    if mode == OPEN:                     # a Take press opened one while the start screen was up
+        return {"action": "ignored", "reason": "take-already-open"}
+    if ((state.get("screens") or {}).get("end") or {}).get("present"):
+        # the start screen gave way straight to the end screen: no content came between, so no take
+        # opens on top of the end screen (the review's finding)
+        return {"action": "ignored", "reason": "end-screen-up"}
+    return {"action": "open", "take": fresh, "previous": take if mode == CLOSED else None}
+
+
 def next_effects(state: dict) -> dict:
     """{"take": effect, "correct": effect}: what each take-stack key would do now."""
     return {TAKE: next_effect(state, TAKE), CORRECT: next_effect(state, CORRECT)}
+
+
+def is_quiet(rec: dict) -> bool:
+    """A visual event that changed nothing (a screen going away that nothing waited
+    for, one from a reference since replaced): recorded, but no feedback line, so
+    it never wipes the pill's last line or `peep learn`'s answer."""
+    return rec.get("kind") == SCREEN and (rec.get("action") == "gone" or rec.get("ignored") in QUIET_IGNORED)
+
+
+def learn_effects(state: dict) -> dict:
+    """{"end": effect, "start": effect}: what learning each screen *now* would do
+    to the takes (C1d: the appearance it is learned on counts). The pill's hint
+    names a learn key from this, the same function the model decides with."""
+    return {"end": next_effect(state, END_SCREEN), "start": next_effect(state, START_SCREEN)}
 
 
 def press_feedback(rec: dict, seq: int, mark: int | None = None) -> dict:
@@ -190,6 +275,10 @@ def press_feedback(rec: dict, seq: int, mark: int | None = None) -> dict:
         fb["mark"] = mark
     if rec.get("segment") is None and rec.get("after_segment") is not None:
         fb["at_boundary"] = rec["after_segment"]          # pressed while paused: effective at the boundary
+    if rec.get("kind") in (LEARN, FORGET, SCREEN):        # C1d: which screen, and what it did to the takes
+        for key in ("screen", "change", "screen_effect", "stable", "same_as_current"):
+            if rec.get(key) is not None:
+                fb[key] = rec[key]
     return fb
 
 
@@ -235,6 +324,17 @@ class EventModel:
         self.finished = False
         self._last_accepted: dict[str, float] = {}     # chord -> qpc of its last accepted hotkey press
         self._last_any: tuple[float, str] | None = None  # (qpc, kind) of the last accepted press of any kind
+        # C1d, auto-takes. The current reference of each screen (None: not learned, or forgotten), every
+        # reference ever learned in order (the sidecar keeps them all: a take boundary names the one that
+        # made it), whether each screen is on screen now, the counted start appearance waiting for its
+        # screen to go away, and what the pill and C1e show per screen.
+        self.references: dict[str, dict | None] = {k: None for k in SCREEN_KINDS}
+        self.reference_log: list[dict] = []
+        self.present: dict[str, bool] = {k: False for k in SCREEN_KINDS}
+        self.start_pending: int | None = None
+        self.screen_stats: dict[str, dict] = {k: {"seen": 0, "last_seen_qpc": None, "last_seen_at": None,
+                                                  "last_effect": None, "learns": 0, "last_learn": None}
+                                              for k in SCREEN_KINDS}
 
     # -- segments --------------------------------------------------------------
 
@@ -320,6 +420,10 @@ class EventModel:
                     rec["correction"] = {"action": "ignored", "reason": "debounce"}
                 self.events.append(rec)
                 return rec
+        if kind in (LEARN, FORGET, SCREEN):
+            self._auto(rec, p)
+            self.events.append(rec)
+            return rec
         handler = {TAKE: self._take, CORRECT: self._correct, MARK: self._mark}.get(kind, self._pause_resume)
         handler(rec)
         if rec["accepted"] and p.source == "hotkey" and chord in DEBOUNCED_CHORDS:
@@ -341,10 +445,15 @@ class EventModel:
         return None
 
     def _stack_state(self) -> dict:
-        """The part of take_state() the chart reads: mode, current take, its undo stack."""
+        """The part of take_state() the chart reads: mode, current take, its undo stack;
+        and for the auto-take rules (C1d) whether the implicit take still stands (no
+        take yet) and whether a counted start screen is waiting to go away."""
         mode, cur = take_mode(self.takes)
         return {"mode": mode, "take": cur["id"] if cur else None, "undo": list(cur.get("undo") or []) if cur else [],
-                "next_take": len(self.takes) + 1}
+                "next_take": len(self.takes) + 1, "implicit": not self.takes,
+                "start_pending": self.start_pending is not None,
+                "screens": {k: {"learned": self.references[k] is not None, "present": self.present[k]}
+                            for k in SCREEN_KINDS}}
 
     def _new_take(self, rec: dict) -> dict:
         for t in self.takes:            # "the previous one is final": undo depth is the current take only
@@ -395,6 +504,221 @@ class EventModel:
         rec.update(accepted=True, action="dropped-take", take=fresh["id"], discarded_take=cur["id"])
         rec["correction"] = {"action": "dropped-take", "dropped": cur["id"], "take": fresh["id"],
                              "boundary": {"take": fresh["id"], "side": "open", **here}, "undo": ["open"]}
+
+    # -- auto-takes (C1d) ----------------------------------------------------------
+
+    def _auto(self, rec: dict, p: Press) -> None:
+        """A learn press, a forget, or a visual event: every one is recorded, with
+        which screen and what it did (or why it did nothing)."""
+        x = p.extra or {}
+        screen = x.get("screen")
+        rec["screen"] = screen
+        if x.get("ref") is not None:
+            rec["ref"] = x["ref"]
+        if screen not in SCREEN_KINDS:
+            rec["ignored"] = "unknown-screen"
+            return
+        {LEARN: self._learn, FORGET: self._forget, SCREEN: self._screen}[rec["kind"]](rec, x, screen)
+
+    def _learn(self, rec: dict, x: dict, screen: str) -> None:
+        """Learn (or re-learn) a screen. The agent captured it and already refused
+        what it could judge (a screen that matches the other one); the model refuses
+        a learn while paused (nothing is recorded, so there is no appearance). The
+        appearance it is learned on counts, unless it is the same appearance of the
+        same screen learned again (`same_as_current`)."""
+        stats = self.screen_stats[screen]
+        stats["learns"] += 1
+        for key in ("stable", "waited_s", "same_as_current"):
+            if key in x:
+                rec[key] = x[key]
+        reason = x.get("refused") or ("paused" if self.paused else None)
+        size = x.get("size")
+        if reason is None and (not x.get("thumb") or not isinstance(size, (list, tuple)) or len(size) != 2):
+            reason = "no-thumbnail"
+        if reason is not None:
+            rec["ignored"] = reason
+            stats["last_learn"] = {"event": rec["id"], "outcome": "refused", "reason": reason, "ref": x.get("ref")}
+            return
+        replaced = self.references[screen]
+        ref = {"ref": x.get("ref") or f"{screen}-{rec['id']}", "screen": screen, "event": rec["id"],
+               "qpc": rec["qpc"], "at": rec.get("requested_at"), "size": [int(size[0]), int(size[1])],
+               "thumb": str(x["thumb"]), "stable": bool(x.get("stable", True)), "waited_s": x.get("waited_s"),
+               "thresholds": x.get("thresholds") if isinstance(x.get("thresholds"), dict) else None,
+               "sampler": x.get("sampler") if isinstance(x.get("sampler"), dict) else None,
+               "replaces": replaced["ref"] if replaced else None}
+        self.references[screen] = ref
+        self.reference_log.append(ref)
+        rec["ref"] = ref["ref"]
+        rec.update(accepted=True, action="relearned" if replaced else "learned")
+        stats["last_learn"] = {"event": rec["id"], "outcome": rec["action"], "ref": ref["ref"]}
+        if x.get("same_as_current") and self.present[screen]:
+            rec["screen_effect"] = {"action": "none", "reason": "same-appearance"}
+            return
+        if screen == "start" and self.start_pending is not None:
+            self.start_pending = None            # the earlier start screen's pending take: superseded by this one
+            rec["superseded_pending"] = True
+        self.present[screen] = True
+        stats["seen"] += 1
+        stats["last_seen_qpc"], stats["last_seen_at"] = rec["qpc"], rec.get("requested_at")
+        rec["screen_effect"] = self._appearance(screen, rec, learned=True)
+
+    def _forget(self, rec: dict, x: dict, screen: str) -> None:
+        if self.references[screen] is None:
+            rec["ignored"] = "not-learned"
+            return
+        rec["ref"] = self.references[screen]["ref"]
+        self.references[screen] = None
+        self.present[screen] = False
+        if screen == "start" and self.start_pending is not None:
+            rec["dropped_pending"] = self.start_pending
+            self.start_pending = None
+        rec.update(accepted=True, action="forgotten")
+
+    def _screen(self, rec: dict, x: dict, screen: str) -> None:
+        """A learned screen appeared or went away (the sampler's hysteresis made
+        it certain; `qpc` is the first sample of the run)."""
+        change = x.get("change")
+        rec["change"] = change
+        rec["source"] = "visual"
+        if isinstance(x.get("score"), dict):
+            rec["score"] = x["score"]
+        if x.get("samples") is not None:
+            rec["samples"] = x["samples"]
+        cur = self.references[screen]
+        if cur is None or x.get("ref") != cur["ref"]:
+            rec["ignored"] = "stale-reference"         # forgotten or re-learned since the sampler saw it
+            return
+        stats = self.screen_stats[screen]
+        if change == "appear":
+            if self.present[screen]:
+                rec["ignored"] = "already-present"
+                return
+            self.present[screen] = True
+            stats["seen"] += 1
+            stats["last_seen_qpc"], stats["last_seen_at"] = rec["qpc"], rec.get("requested_at")
+            eff = self._appearance(screen, rec, learned=False)
+            rec["screen_effect"] = eff
+            if eff["action"] == "ignored":
+                rec["ignored"] = eff["reason"]
+            else:
+                rec.update(accepted=True, action=eff["action"], take=eff.get("take"))
+            return
+        if change != "gone":
+            rec["ignored"] = "unknown-change"
+            return
+        if not self.present[screen]:
+            rec["ignored"] = "not-present"
+            return
+        self.present[screen] = False
+        if screen != "start":
+            rec.update(accepted=True, action="gone")        # an end screen going away changes nothing
+            return
+        eff = next_effect(self._stack_state(), START_GONE)
+        if self.start_pending is None:                      # nothing waits for this one: an observation
+            rec["screen_effect"] = eff
+            rec.update(accepted=True, action="gone")
+            return
+        pending, self.start_pending = self.start_pending, None
+        rec["pending_from"] = pending
+        if eff["action"] == "open" and self._too_early(rec):
+            eff = {"action": "ignored", "reason": "earlier-than-the-last-boundary"}
+        rec["screen_effect"] = eff
+        stats["last_effect"] = {"event": rec["id"], **eff}
+        if eff["action"] != "open":
+            rec["ignored"] = eff["reason"]
+            return
+        take = self._new_take(rec)
+        rec.update(accepted=True, action="open", take=take["id"])
+
+    def _too_early(self, rec: dict) -> bool:
+        """A visual event is stamped at its first matching sample but reaches the
+        model up to a few hundred ms later, after any press made meanwhile. An
+        automatic boundary earlier than the current take's last boundary would
+        put the takes out of order: it is ignored instead (the press made while
+        the screen was up stands)."""
+        mode, cur = take_mode(self.takes)
+        if cur is None or rec.get("qpc") is None:
+            return False
+        last = [b.get("qpc") for b in (cur.get("open"), cur.get("close")) if isinstance(b, dict)]
+        last = [q for q in last if isinstance(q, (int, float))]
+        return bool(last) and rec["qpc"] < max(last)
+
+    def _opened_by_a_screen(self) -> bool:
+        """The current take is open and a start screen's going opened it."""
+        mode, cur = take_mode(self.takes)
+        if mode != OPEN:
+            return False
+        ev = next((e for e in self.events if e["id"] == (cur.get("open") or {}).get("event")), None)
+        return bool(ev and ev.get("kind") == SCREEN)
+
+    def _appearance(self, screen: str, rec: dict, learned: bool) -> dict:
+        """The rules table for one counted appearance at `rec` (a screen event, or a
+        learn press: learning counts the appearance it is learned on). Returns the
+        effect, already applied to the takes."""
+        stats = self.screen_stats[screen]
+        kind = END_SCREEN if screen == "end" else START_SCREEN
+        eff = next_effect(self._stack_state(), kind)
+        empty = False
+        if eff["action"] in ("close", "pending") and self._too_early(rec):
+            if eff["action"] == "close" and self._opened_by_a_screen():
+                # The end screen was up before the start screen's going reached the model (an end screen
+                # learned while its capture settled, say): an automatic open never wins over a screen,
+                # so that take closes where it opened, empty (the review's finding).
+                empty = True
+            else:
+                eff = {"action": "ignored", "reason": "earlier-than-the-last-boundary"}
+        if eff["action"] == "close":
+            if eff.get("implicit"):
+                take = self._implicit_take(rec)
+            else:
+                take = self.takes[-1]
+                take["close"] = {**take["open"], "event": rec["id"]} if empty else self._position(rec)
+                take["status"] = "closed"
+                take["undo"] = ["open", "close"]
+                if empty:
+                    eff = {**eff, "empty": True}
+            if learned:
+                rec["take"] = take["id"]
+        elif eff["action"] == "pending":
+            self.start_pending = rec["id"]
+        stats["last_effect"] = {"event": rec["id"], **eff}
+        return eff
+
+    def _implicit_take(self, rec: dict) -> dict:
+        """The implicit take made explicit (C1d): take 1 from the first frame of the
+        recording to here. Only an end screen does this, and only while no take
+        exists; from then on the recording is in take mode."""
+        first = min(self.segments) if self.segments else 1
+        take = {"id": len(self.takes) + 1, "open": {"event": None, "implicit": True, "qpc": None, "segment": first,
+                                                   "media_s": 0.0},
+                "close": self._position(rec), "discarded_by": None, "status": "closed", "undo": ["open", "close"],
+                "implicit": True}
+        self.takes.append(take)
+        return take
+
+    def auto_takes_state(self) -> dict:
+        """What active.json's `auto_takes` block says per screen (C1e shows it):
+        learned or not, when, its reference id, how often it has been seen, when
+        last, and the last thing it did. The recorder adds the thumbnail's path."""
+        out = {}
+        for k in SCREEN_KINDS:
+            ref, st = self.references[k], self.screen_stats[k]
+            out[k] = {"learned": ref is not None, "ref": ref["ref"] if ref else None,
+                      "learned_at": ref["at"] if ref else None, "learned_qpc": ref["qpc"] if ref else None,
+                      "stable": ref["stable"] if ref else None, "present": self.present[k],
+                      "seen": st["seen"], "last_seen_qpc": st["last_seen_qpc"], "last_seen_at": st["last_seen_at"],
+                      "last_effect": st["last_effect"], "learns": st["learns"], "last_learn": st["last_learn"]}
+        out["start"]["pending"] = self.start_pending is not None
+        return out
+
+    def auto_takes_record(self) -> dict | None:
+        """The sidecar's `auto_takes` block, or None when no screen was ever learned
+        (a recording that never learns one keeps exactly C1c's sidecar)."""
+        if not self.reference_log:
+            return None
+        return {"rule": AUTO_RULE, "references": list(self.reference_log),
+                "current": {k: (self.references[k] or {}).get("ref") for k in SCREEN_KINDS},
+                "pending_start": self.start_pending}
 
     def _mark(self, rec: dict) -> None:
         rec.update(accepted=True, action="mark")

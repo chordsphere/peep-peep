@@ -1,5 +1,6 @@
 """Session C1c: the two-line pill. The ratified mockups reproduced from real
-event-model states, key labels from the configured chords, the 1.5 s
+event-model states (C1d: with the learn key that fits at the end of the hint,
+`] end` / `[ start`, from the same decision function), key labels from the configured chords, the 1.5 s
 feedback line through the agent, `pill_hints`, the enlarged pill's corner
 against the fiducial patch, and the renamed config keys (`correct_*`, with
 `retake_*` accepted) in the loader and in `peep config`."""
@@ -39,18 +40,18 @@ class MockupTest(unittest.TestCase):
     def test_no_takes_yet(self):
         s = Session()
         self.assertEqual(self.lines("recording", 41, published(s, 141)),
-                         ["● 00:41  whole video kept", "T start take · P pause · M mark"])
+                         ["● 00:41  whole video kept", "T start take · P pause · M mark · ] end"])
 
     def test_take_open(self):
         s = self.two_takes()
         self.assertEqual(self.lines("recording", 192, published(s, 292)),
-                         ["● 03:12  ◉ take 2 · 0:48", "T close · ⌫ restart take · P pause"])
+                         ["● 03:12  ◉ take 2 · 0:48", "T close · ⌫ restart take · P pause · ] end"])
 
     def test_take_just_closed(self):
         s = self.two_takes()
         s.press(hk("take", 300))
         self.assertEqual(self.lines("recording", 200, published(s, 300)),
-                         ["● 03:20  ○ 2 takes · 2:14 kept", "T next take · ⌫ move close here"])
+                         ["● 03:20  ○ 2 takes · 2:14 kept", "T next take · ⌫ move close here · [ start"])
 
     def test_after_one_correction(self):
         s = self.two_takes()
@@ -120,7 +121,8 @@ class MockupTest(unittest.TestCase):
 
 class KeyLabelTest(unittest.TestCase):
     def test_labels_come_from_the_configured_chords(self):
-        self.assertEqual(LABELS, {"take": "T", "correct": "⌫", "pause": "P", "mark": "M"})
+        self.assertEqual(LABELS, {"take": "T", "correct": "⌫", "pause": "P", "mark": "M", "learn_start": "[",
+                                  "learn_end": "]"})                 # C1d added the learn keys
         ag = c.from_mapping({"agent": {"take_hotkey": "F13", "correct_hotkey": "Ctrl+Alt+Num2"}}).agent
         labels = pill.key_labels(ag)
         self.assertEqual((labels["take"], labels["correct"]), ("F13", "Num2"))
@@ -208,7 +210,7 @@ class AgentPillTest(AgentHarness, unittest.TestCase):
         self.assertTrue(self.ui.pills[-1].endswith("\nT take 1 closed"), self.ui.pills[-1])
         a.now = lambda: now + dt.timedelta(seconds=1.6)
         a.tick()
-        self.assertTrue(self.ui.pills[-1].endswith("\nT next take · ⌫ move close here"), self.ui.pills[-1])
+        self.assertTrue(self.ui.pills[-1].endswith("\nT next take · ⌫ move close here · [ start"), self.ui.pills[-1])
         # the same press is not shown again; the next one is
         r2 = s.press(hk("correct", 192))
         self.control.update_active(feedback=ev.press_feedback(r2, 3), take_state={**published(s, 192),
@@ -228,7 +230,7 @@ class AgentPillTest(AgentHarness, unittest.TestCase):
         fb = {**ev.press_feedback(r, 1), "at": (now - dt.timedelta(minutes=5)).isoformat()}
         self.claim(s, 110, now, feedback=fb)
         a.tick()
-        self.assertEqual(self.ui.pills[-1], "● 00:10  ◉ take 1 · 0:00\nT close · ⌫ restart take · P pause")
+        self.assertEqual(self.ui.pills[-1], "● 00:10  ◉ take 1 · 0:00\nT close · ⌫ restart take · P pause · ] end")
         fresh = s.press(hk("take", 112))
         self.control.update_active(feedback={**ev.press_feedback(fresh, 2), "at": now.isoformat()},
                                    take_state={**published(s, 112), "at": now.isoformat()})
@@ -244,7 +246,7 @@ class AgentPillTest(AgentHarness, unittest.TestCase):
         self.claim(s, 110, now)
         a.now = lambda: now + dt.timedelta(seconds=12)
         a.tick()
-        self.assertEqual(self.ui.pills[-1], "● 00:22  ◉ take 1 · 0:12\nT close · ⌫ restart take · P pause")
+        self.assertEqual(self.ui.pills[-1], "● 00:22  ◉ take 1 · 0:12\nT close · ⌫ restart take · P pause · ] end")
         self.control.release()
 
     def test_pill_hints_off(self):

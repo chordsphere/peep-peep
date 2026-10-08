@@ -30,6 +30,15 @@ Session C1c: the pill is two lines (mockups ratified 2026-10-07):
   Paused                ❚❚ PAUSED 03:24  ○ 2 takes
                         P resume · nothing is recording
 
+Session C1d (auto-takes) adds feedback lines for the learn keys (`⇥ end
+screen learned · take 2 closed`) and for what the sampler saw (`◇ end screen
+→ take 2 closed`, `◇ start screen gone → take 3 opened`, `◇ end screen seen
+— no take open`), and the hint names a learn key where it fits after C1c's
+keys: the one whose screen would make a take boundary now, from the same
+decision function (events.learn_effects), shortened to `] end` / `[ start`
+when the full words do not fit. Nothing else about the pill changes (the
+expanded pill is session C1e).
+
 The first line is the state; the second (the hint) says what each key does
 now. The hint is computed by `events.next_effects` from the take state the
 recorder publishes, the same function the recorder's event model decides
@@ -131,9 +140,10 @@ FEEDBACK_S = 1.5                 # a press's feedback replaces the hint line thi
 FEEDBACK_LATE_S = 1.0            # feedback first seen later than FEEDBACK_S + this after its press is not shown
 HINT_MAX_CHARS = 44              # a longer hint drops its trailing keys, then is cut with "…"
 KEY_SYMBOLS = {"Backspace": "⌫", "Delete": "Del", "Escape": "Esc", "Insert": "Ins", "PageUp": "PgUp",
-               "PageDown": "PgDn"}
+               "PageDown": "PgDn", "LeftBracket": "[", "RightBracket": "]"}
 # The CLI's wording of a feedback: no key label (it prints "↺ correct: <feedback>").
 WORD_LABELS = {"take": "", "correct": "", "pause": "", "mark": ""}
+LEARN_MARK, SEEN_MARK = "⇥", "◇"     # C1d: a learn press's feedback / what the sampler saw
 
 
 def key_label(chord_text: str) -> str:
@@ -149,6 +159,9 @@ def key_labels(agent_cfg) -> dict:
     shown in full, so the hint never names one key for two actions."""
     chords = {"take": agent_cfg.take_hotkey, "correct": agent_cfg.correct_hotkey,
               "pause": agent_cfg.pause_hotkey, "mark": agent_cfg.mark_hotkey}
+    for action in ("learn_start", "learn_end"):              # C1d; an AgentConfig from before C1d has neither
+        if getattr(agent_cfg, f"{action}_hotkey", None):
+            chords[action] = getattr(agent_cfg, f"{action}_hotkey")
     short = {a: key_label(t) for a, t in chords.items()}
     clash = {v for v in short.values() if list(short.values()).count(v) > 1}
     return {a: (chords[a] if short[a] in clash else short[a]) for a in chords}
@@ -229,6 +242,23 @@ def _fit(items: list[str], limit: int = HINT_MAX_CHARS) -> str:
     return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
 
 
+def learn_hints(state: dict) -> list:
+    """C1d: which learn keys the hint names, in order, as (key, long words,
+    short words): a screen not learned yet whose appearance now would make a
+    take boundary (events.learn_effects: the decision the model will make when
+    the screen is learned on, or appears). An end screen closes the open take
+    (or the implicit whole-video one); a start screen opens one when it goes."""
+    screens = state.get("screens") if isinstance(state.get("screens"), dict) else {}
+    effects = events.learn_effects(state)
+    out = []
+    for kind, key in (("end", "learn_end"), ("start", "learn_start")):
+        if (screens.get(kind) or {}).get("learned"):
+            continue
+        if effects[kind]["action"] in ("close", "pending"):
+            out.append((key, f"{kind} screen", kind))
+    return out
+
+
 def hint_line(status: str, state: dict | None, labels: dict) -> str | None:
     """The pill's second line, or None when there is nothing to say (starting,
     saving, pausing…, or no take state)."""
@@ -237,7 +267,66 @@ def hint_line(status: str, state: dict | None, labels: dict) -> str | None:
     if status != "recording" or not isinstance(state, dict):
         return None
     words = hint_words(state)
-    return _fit([f"{labels.get(k, k)} {words[k]}" for k in ("take", "correct", "pause", "mark") if k in words])
+    text = _fit([f"{labels.get(k, k)} {words[k]}" for k in ("take", "correct", "pause", "mark") if k in words])
+    for key, long, short in learn_hints(state):     # C1d: only where they fit; never displacing C1c's keys
+        if key not in labels:
+            continue
+        for words_ in (long, short):
+            candidate = f"{text} · {labels[key]} {words_}"
+            if len(candidate) <= HINT_MAX_CHARS and not text.endswith("…"):
+                text = candidate
+                break
+    return text
+
+
+def screen_feedback(fb: dict) -> str | None:
+    """C1d: the feedback line of a learn press, a forget, or a visual event; None
+    for what changes nothing worth a line (a screen going away that nothing
+    waited for, an event from a reference already replaced)."""
+    kind, screen = fb.get("kind"), fb.get("screen") or "?"
+    ignored, action = fb.get("ignored"), fb.get("action")
+    eff = fb.get("screen_effect") if isinstance(fb.get("screen_effect"), dict) else {}
+    other = {"start": "end", "end": "start"}.get(screen, "other")
+    if kind == "learn":
+        if ignored:
+            return {f"same-as-{other}-screen": f"{LEARN_MARK} not learned: that is the {other} screen",
+                    "paused": f"{LEARN_MARK} {screen} screen: not while paused",
+                    "no-thumbnail": f"{LEARN_MARK} {screen} screen: could not read it"}.get(
+                ignored, f"{LEARN_MARK} {screen} screen not learned ({ignored})")
+        text = f"{LEARN_MARK} {screen} screen " + ("re-learned" if action == "relearned" else "learned")
+        if eff.get("action") == "close":
+            text += f" · take {eff.get('take')} closed"
+        elif eff.get("action") == "pending":
+            text += " · opens a take when gone"
+        elif eff.get("action") == "ignored":
+            text += {"no-take-open": " · no take open", "take-already-open": " · take already open"}.get(
+                eff.get("reason"), "")
+        if fb.get("stable") is False:
+            text += " (moving)"
+        return text
+    if kind == "forget":
+        return f"{LEARN_MARK} {screen} screen " + ("was not learned" if ignored else "forgotten")
+    if kind != "screen":
+        return None
+    change = fb.get("change")
+    if ignored in events.QUIET_IGNORED:
+        return None
+    if change == "appear":
+        if action == "close":
+            return f"{SEEN_MARK} {screen} screen → take {fb.get('take')} closed"
+        if action == "pending":
+            return f"{SEEN_MARK} {screen} screen up → take opens when it goes"
+        why = {"no-take-open": "no take open", "take-already-open": "take already open",
+               "earlier-than-the-last-boundary": "a press came first"}.get(ignored, ignored)
+        return f"{SEEN_MARK} {screen} screen seen — {why}"
+    if change == "gone":
+        if action == "open":
+            return f"{SEEN_MARK} {screen} screen gone → take {fb.get('take')} opened"
+        if ignored:
+            why = {"take-already-open": "take already open", "end-screen-up": "the end screen is up",
+                   "earlier-than-the-last-boundary": "a press came first"}.get(ignored, ignored)
+            return f"{SEEN_MARK} {screen} screen gone — {why}"
+    return None
 
 
 def feedback_text(fb: dict | None, labels: dict) -> str | None:
@@ -247,6 +336,8 @@ def feedback_text(fb: dict | None, labels: dict) -> str | None:
     if not isinstance(fb, dict):
         return None
     kind, action, ignored = fb.get("kind"), fb.get("action"), fb.get("ignored")
+    if kind in ("learn", "forget", "screen"):
+        return screen_feedback(fb)
     chord = "pause" if kind in ("pause", "resume", "pause-toggle") else kind
     key = labels.get(chord, chord or "?")
     if ignored == "debounce":
